@@ -426,6 +426,20 @@ SESSION_DIR="runner/results/${COMBINATION_ID}/${SESSION_DATE}_$(date -u +%H%M%S)
 mkdir -p "$SESSION_DIR"
 info "Session directory: ${SESSION_DIR}"
 
+# Print runtime configuration for reproducibility
+info "Runtime configuration:"
+PATRONI_CONFIG=$(docker exec "${COMBO_PREFIX}-node1" curl -s http://localhost:8008/config 2>/dev/null || echo "{}")
+LOOP_WAIT=$(echo "$PATRONI_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin).get('loop_wait','?'))" 2>/dev/null || echo "?")
+TTL=$(echo "$PATRONI_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ttl','?'))" 2>/dev/null || echo "?")
+RETRY_TIMEOUT=$(echo "$PATRONI_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin).get('retry_timeout','?'))" 2>/dev/null || echo "?")
+SYNC_MODE=$(echo "$PATRONI_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin).get('synchronous_mode','false'))" 2>/dev/null || echo "?")
+MAX_LAG=$(echo "$PATRONI_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin).get('maximum_lag_on_failover','?'))" 2>/dev/null || echo "?")
+echo "  loop_wait: $LOOP_WAIT"
+echo "  ttl: $TTL"
+echo "  retry_timeout: $RETRY_TIMEOUT"
+echo "  synchronous_mode: $SYNC_MODE"
+echo "  maximum_lag_on_failover: $MAX_LAG"
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@
 
 When a Patroni-managed PostgreSQL primary fails, multiple components react in a cascade: the DCS detects the leader is gone, Patroni promotes a replica, the routing layer discovers the new topology, and the client reconnects. This tool captures timestamped events at every layer and shows you exactly where time is spent.
 
+> **Scope:** This tool measures *infrastructure failover visibility* — how long each layer takes to detect and propagate a topology change. It does not measure application-level recovery (connection pool rebuild, transaction retry, cache invalidation) or RPO/data loss. These are illustrative scenarios on a controlled environment; your production timing will differ based on hardware, network, and configuration.
+
 ## What It Measures
 
 The routing layer between your application and PostgreSQL affects failover behavior in four ways. This tool measures each one independently:
@@ -98,6 +100,30 @@ Median client-perceived downtime (seconds):
 - **consul-template + reload (combo 07) is the fastest HAProxy variant** — event-driven detection vs periodic polling.
 - **VIP poll (combo 03) is fastest overall** for graceful failures with dedicated routing infrastructure.
 
+### Per-Component Timing Breakdown
+
+The tool doesn't just measure total downtime — it captures timestamped events at every layer, showing exactly where time is spent during a failover.
+
+**HAProxy REST polling (combo 06) — hard_stop, 9.4s total:**
+
+![Failover Timeline — HAProxy](docs/images/gantt_haproxy_hard_stop.png)
+
+The routing layer (HAProxy health checks at `inter 2s × fall 3`) accounts for most of the downtime. Patroni promotion and DCS detection happen within the first 1-2 seconds — the remaining 7+ seconds is HAProxy discovering the new primary.
+
+**libpq multi-host (combo 01) — hard_stop, 1.3s total:**
+
+![Failover Timeline — libpq](docs/images/gantt_libpq_hard_stop.png)
+
+With libpq multi-host, the client detects the new primary directly — no routing layer delay. The entire failover is bounded by DCS detection + PostgreSQL promotion.
+
+**Phase breakdown — where bottlenecks shift:**
+
+![Phase Breakdown — HAProxy](docs/images/phases_haproxy_hard_stop.png)
+
+Each routing layer shifts the bottleneck to a different component. HAProxy combinations are dominated by health check polling. VIP combinations are bounded by ARP cache propagation. DNS combinations depend on TTL expiry. The tool makes these bottleneck shifts visible.
+
+> **Key insight:** Tuning Patroni (`loop_wait`, `ttl`) only helps when Patroni is the bottleneck. If the routing layer dominates (as in HAProxy combinations), reducing `loop_wait` from 10s to 5s has zero impact on total downtime. The per-component breakdown tells you where to focus optimization effort.
+
 ### Where Time Is Spent (Combo 06 Baseline)
 
 During a `hard_stop` failover with HAProxy REST polling:
@@ -109,6 +135,12 @@ During a `hard_stop` failover with HAProxy REST polling:
 | Routing detection | ~2–6s | HAProxy health checks detect the new primary (`inter 2s × fall 3`) |
 | Client recovery | ~1–4s | Application reconnects through the routing layer |
 | **Total downtime** | **~9–12s** | End-to-end client-perceived outage |
+
+```
+Critical path: DCS detection (1.0s) → PG promotion (1.3s) → Routing detection (6.0s) → Client recovery (1.0s)
+Dominant factor: Routing layer (HAProxy health check polling)
+Optimization target: Reduce inter/fall values, or switch to event-driven routing (combos 07-09)
+```
 
 ---
 
@@ -258,6 +290,26 @@ bootstrap:
 
 These settings directly affect ungraceful failover timing. `ttl: 30` means a hard_kill waits up to 30s before replicas can acquire the leader lock.
 
+### Runtime Configuration Visibility
+
+Every test run captures the active Patroni configuration at the start,
+so results are always reproducible:
+
+```
+[CONFIG] Patroni DCS settings:
+  loop_wait: 10
+  ttl: 30
+  retry_timeout: 10
+  synchronous_mode: false
+  maximum_lag_on_failover: 1048576
+```
+
+These parameters define the lower bound of failover detection. Aggressive
+tuning (e.g., `ttl: 10`, `loop_wait: 3`) reduces detection time but
+increases the risk of false failovers during transient network issues.
+The benchmark uses standard Patroni defaults across all combinations to
+ensure fair comparison.
+
 ### HAProxy Health Check (Combos 06–09)
 
 ```
@@ -267,6 +319,19 @@ default-server inter 2s fall 3 rise 2
 - `inter 2s` — check every 2 seconds
 - `fall 3` — 3 consecutive failures to mark DOWN (worst-case detection: 6s)
 - `rise 2` — 2 consecutive passes to mark UP
+
+### Tuning Trade-offs
+
+Reducing timing parameters improves failover speed but introduces risks:
+
+| Parameter | Aggressive Value | Risk |
+|---|---|---|
+| `ttl` < 15s | Leader lock expires too fast | False failovers during GC pauses or network blips |
+| `loop_wait` < 5s | Patroni polls DCS too frequently | Increased DCS load, potential instability |
+| HAProxy `inter` < 1s | Health checks too frequent | Increased load on Patroni REST API |
+| HAProxy `fall` < 2 | Too few failures before marking DOWN | Flapping backends on transient errors |
+
+The benchmark uses standard defaults (`ttl: 30`, `loop_wait: 10`, `inter: 2s`, `fall: 3`) across all combinations. The "tuned" variant (combo 06t) demonstrates the effect of reducing `ttl` from 30 to 20, showing that tuning the DCS primarily affects `hard_kill` scenarios where session TTL dominates.
 
 ---
 
@@ -286,6 +351,7 @@ Access at http://localhost:3000 (admin/admin) when running the benchmark lab.
 - **Docker benchmark environment** — results reflect Docker networking behavior, not bare-metal or cloud. Use the [measurement tool](#use-it-on-your-cluster) on your own infrastructure for production-representative numbers.
 - **Single-node Consul** — production deployments use 3+ Consul servers. Single-node Consul has no Raft consensus overhead.
 - **No concurrent load** — the heartbeat client sends sequential queries. Production failovers under heavy load may behave differently.
+- **Clock synchronization** — The per-component timing breakdown (Gantt charts, phase waterfall) depends on synchronized clocks across all observed nodes. In the Docker benchmark lab, all containers share the host kernel clock — no drift. When using the [measurement tool](#use-it-on-your-cluster) against real VMs across multiple hosts, ensure NTP is configured. Run `timedatectl status` on each node and verify "synchronized: yes". Check offset with `chronyc tracking` — aim for less than 10ms for accurate Gantt diagrams. If clocks are not synchronized, the Gantt diagram may show false overlaps or incorrect phase ordering. The total downtime measurement (client-perceived) is unaffected because it uses a single clock source (the heartbeat client container).
 
 ---
 

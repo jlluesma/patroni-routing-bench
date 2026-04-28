@@ -4,7 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-A benchmarking framework for measuring PostgreSQL failover detection latency across different Patroni routing strategies. Each routing strategy is called a "combination" and runs as an isolated Docker Compose stack. All combinations share a single dashboard stack (TimescaleDB + Prometheus + Grafana) that persists data across test runs.
+A benchmarking and measurement tool for PostgreSQL failover timing across Patroni routing strategies.
+
+Two faces:
+1. **Measurement tool** (`tool/`) — Docker images that connect to any existing Patroni cluster and measure failover timing at every layer of the routing stack.
+2. **Benchmark lab** (`dcs/consul/`) — 9 routing combinations deployed as Docker Compose stacks for automated failover testing.
+
+## Key Directories
+
+```
+tool/                          # THE TOOL — canonical source for all images
+├── observers/                 # Observer agent (one image, multiple watcher types)
+│   ├── core/agent.py          # Entry point — reads OBSERVER_COMPONENT, loads watcher
+│   ├── core/watcher.py        # BaseWatcher ABC: setup(), poll(), teardown()
+│   ├── core/emitter.py        # Batches events, flushes to TimescaleDB
+│   └── watchers/              # patroni, consul, haproxy, postgres_sql, vip
+├── clients/failover/          # Heartbeat client for failover timing
+├── timescaledb/schema/        # Schema SQL (auto-applied on first start)
+├── charts/                    # Chart generation (Plotly)
+├── docker-compose.yml         # For external users (measure their own cluster)
+└── .env.example               # User fills in their endpoints
+
+dcs/consul/                    # 9 routing combinations (benchmark lab)
+├── 01-libpq-multihost/
+├── 02-consul-dns/
+├── ...
+└── 09-patroni-callback-haproxy/
+
+dashboard/                     # TimescaleDB + Prometheus + Grafana stack
+runner/                        # Batch test automation
+shared/docker/postgres-patroni/  # PostgreSQL 18 + Patroni base image
+```
 
 ## Running the Stacks
 
@@ -13,16 +43,24 @@ A benchmarking framework for measuring PostgreSQL failover detection latency acr
 cd dashboard && docker compose up -d
 
 # Start a specific combination
-cd dcs/consul/06-haproxy-rest-polling && docker compose up -d
+cd dcs/consul/06-haproxy-rest-polling && docker compose up -d --build
 
 # Check cluster health
-docker exec prb-06-node1 patronictl list
+docker exec prb-06-node1 patronictl -c /etc/patroni/patroni.yml list
 
-# Trigger a failover
-docker stop prb-06-node1
+# Run a failover test
+cd ~/patroni-routing-bench
+./runner/run_failover_test.sh \
+    --combo-dir 06-haproxy-rest-polling \
+    --combo-id 06-haproxy-rest-polling \
+    --prefix prb-06 \
+    --scenario hard_stop --iterations 3
+
+# Run all 9 combinations
+./runner/run_batch.sh --skip "05,10" --iterations 3
 
 # Tear down a combination (dashboard stays up)
-docker compose down -v
+cd dcs/consul/06-haproxy-rest-polling && docker compose down -v
 ```
 
 Access:
@@ -34,51 +72,67 @@ Access:
 
 ## Architecture
 
-### Dashboard stack (`dashboard/`)
-Runs independently and is shared across all combinations. Contains:
-- **TimescaleDB**: stores failover timing events (`observer_events`, `client_events`, `test_runs` tables)
-- **Prometheus**: scrapes exporters from whichever combination is running
-- **Grafana**: pre-provisioned dashboards, auto-loaded from `dashboard/grafana/dashboards/`
+### tool/ (canonical source)
+All observer and client Docker images build from `tool/`. Combination
+docker-compose files reference `tool/` via relative paths:
+```yaml
+observer-patroni:
+  build:
+    context: ../../../tool/observers
+client:
+  build:
+    context: ../../../tool/clients/failover
+```
 
-Schema migrations in `observer/schema/` are mounted into TimescaleDB and run in order (001_, 002_, 003_) on first start.
+### Observer agent (`tool/observers/`)
+Pluggable watcher system:
+- `core/agent.py`: reads `OBSERVER_COMPONENT` env var, dynamically loads watcher
+- `core/watcher.py`: `BaseWatcher` ABC with `setup()`, `poll()`, `teardown()`
+- `core/emitter.py`: batches and flushes state-change events to TimescaleDB
+- `watchers/`: one file per component type
+
+Watcher registry:
+```python
+WATCHER_REGISTRY = {
+    "patroni": "watchers.patroni_watcher.PatroniWatcher",
+    "consul": "watchers.consul_watcher.ConsulWatcher",
+    "haproxy": "watchers.haproxy_watcher.HAProxyWatcher",
+    "vip": "watchers.vip_watcher.VIPWatcher",
+    "postgres": "watchers.postgres_sql_watcher.PostgresSQLWatcher",
+}
+```
+
+The PostgreSQL watcher uses SQL-based detection (`pg_is_in_recovery()`,
+`pg_control_checkpoint()`) — connects remotely via TCP, no log file needed.
+Multi-target mode (patroni and postgres): `WATCHER_TARGETS` env var spawns
+one watcher thread per target node.
+
+### Dashboard stack (`dashboard/`)
+Shared across all combinations:
+- **TimescaleDB**: stores events (schema from `tool/timescaledb/schema/`)
+- **Prometheus**: scrapes exporters
+- **Grafana**: pre-provisioned dashboards
 
 ### Combination stack (`dcs/<dcs-type>/<NN>-<name>/`)
 Each combination is self-contained with:
-- 3 Patroni/PostgreSQL nodes (1 primary + 2 replicas)
-- 1 Consul server (DCS)
-- 1 HAProxy (or other router, depending on combination)
-- 1 Client heartbeat container
-- Multiple Observer agent containers (one per component type)
-- Prometheus exporters (node_exporter, postgres_exporter, consul_exporter)
-
-Two Docker networks per combination:
-- `prb-<NN>-bench`: internal communication between components
-- `prb-dashboard` (external): shared with the dashboard stack for metrics/events
-
-### Shared Docker images (`shared/docker/`)
-Built locally and reused across combinations:
-- **`postgres-patroni/`**: PostgreSQL + Patroni image, configured via `patroni.yml` and env vars
-- **`client/`**: Python heartbeat client (`heartbeat.py`) — fires INSERTs every 100ms and records success/failure to TimescaleDB via `reporter.py`
-- **`observer/`**: Python observer daemon — polls component REST APIs every 200ms, detects state changes, emits events to TimescaleDB
-
-### Observer agent (`shared/docker/observer/`)
-The observer is a pluggable watcher system:
-- `core/agent.py`: entry point — reads `OBSERVER_COMPONENT` env var, dynamically loads the right watcher
-- `core/watcher.py`: `BaseWatcher` ABC with `setup()`, `poll()`, `teardown()` lifecycle
-- `core/emitter.py`: batches and flushes state-change events to TimescaleDB
-- `watchers/`: one file per component — `patroni_watcher.py`, `consul_watcher.py`, `haproxy_watcher.py`, `vip_watcher.py`, `postgres_watcher.py`
-
-To add a new watcher type: implement `BaseWatcher`, add it to `WATCHER_REGISTRY` in `agent.py`.
+- 3 Patroni/PostgreSQL nodes
+- 1 Consul server
+- 1 Router (HAProxy, VIP, DNS, or libpq)
+- 1 Client heartbeat container (builds from `tool/clients/failover`)
+- Observer containers (build from `tool/observers`)
 
 ## Adding a New Combination
 
 1. Create `dcs/<dcs-type>/<NN>-<name>/` directory
-2. Copy and adapt `docker-compose.yml` from combination 06 (the baseline)
-3. Add a `config/` directory with `patroni.yml`, `consul.json`, and whatever router config applies
-4. Set `COMBINATION_ID` env var in the client and observer containers to a unique string matching the directory name
-5. Combination 06 is the baseline — all others are compared against it
+2. Copy `docker-compose.yml` from combination 06 (the baseline)
+3. Add `config/` with `patroni.yml`, `consul.json`, and router config
+4. Set `COMBINATION_ID` in client and observer containers
+5. Ensure observer/client builds reference `tool/`:
+   - `context: ../../../tool/observers`
+   - `context: ../../../tool/clients/failover`
+6. See `docs/combinations.md` for full conventions
 
-## Key Timing Parameters (combination 06 baseline)
+## Key Timing Parameters
 
 | Parameter | Value |
 |---|---|
@@ -88,30 +142,16 @@ To add a new watcher type: implement `BaseWatcher`, add it to `WATCHER_REGISTRY`
 | Patroni `loop_wait` | 10s |
 | Patroni `ttl` | 30s |
 | Client heartbeat interval | 100ms |
-| Observer poll interval | 200ms |
-
-Worst-case failover detection: `inter × fall` = 6s (HAProxy) + `loop_wait + ttl` (Patroni leader election).
-
-## Logging & Observability
-
-All components log verbosely by default to support failover timeline analysis.
-Shared config templates live in `shared/config/`. See `docs/combinations.md`
-for the full conventions.
-
-- **PostgreSQL**: `log_connections`, `log_disconnections`, `log_replication_commands`, `log_checkpoints` are all ON. Captures connection lifecycle and replication events during failover.
-- **Consul**: `log_level: DEBUG` to expose Raft election timing and KV operations.
-- **HAProxy**: `option log-health-checks` logs every health check state transition (L7OK, L7STS, L4TOUT).
-
-Inspect component logs during/after a failover:
-```bash
-docker logs prb-06-node1 2>&1 | grep -iE "promote|recovery|connection"
-docker logs prb-06-consul 2>&1 | grep -i raft
-docker logs prb-06-haproxy 2>&1 | tail -30
-```
+| Observer poll interval | 100ms |
 
 ## TimescaleDB Schema
 
-Three core tables (defined in `observer/schema/`):
+Three core tables (defined in `tool/timescaledb/schema/`):
 - `test_runs`: metadata per test run (combination, failover type, config)
 - `observer_events`: server-side state changes (`component`, `node`, `event_type`, `old_value`, `new_value`)
 - `client_events`: per-query heartbeat results (`success`, `latency_us`, `error`)
+
+Key views:
+- `failover_window`: client-perceived downtime per test run
+- `component_timing`: per-component detection timing
+- `failover_timeline`: merged server + client event stream
