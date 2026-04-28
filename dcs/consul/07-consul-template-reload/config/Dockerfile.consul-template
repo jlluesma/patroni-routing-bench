@@ -1,0 +1,5 @@
+FROM hashicorp/consul-template:latest
+
+USER root
+
+RUN apk add --no-cache socat

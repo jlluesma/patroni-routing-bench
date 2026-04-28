@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["patroni-node1:9100", "patroni-node2:9100", "patroni-node3:9100", "consul-server:9100", "haproxy:9100"],
+    "labels": {
+      "combination": "06-haproxy-rest-polling",
+      "env": "bench"
+    }
+  }
+]

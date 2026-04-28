@@ -1,0 +1,77 @@
+###############################################################################
+# patroni-routing-bench: Prometheus Configuration
+#
+# Scrape targets for infrastructure monitoring during failover tests.
+# This config uses placeholder targets — each combination's docker-compose
+# will define the actual hostnames via DNS.
+#
+# Scrape interval is set to 2s (instead of default 15s) because failover
+# events happen in seconds and we need fine-grained resolution.
+###############################################################################
+
+global:
+  scrape_interval: 2s
+  evaluation_interval: 5s
+
+  external_labels:
+    project: "patroni-routing-bench"
+
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # Prometheus self-monitoring
+  # ---------------------------------------------------------------------------
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ---------------------------------------------------------------------------
+  # Node Exporter — system metrics (CPU, memory, disk, network)
+  # Runs as a sidecar on every component container
+  # ---------------------------------------------------------------------------
+  - job_name: "node"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/node_targets.json
+        refresh_interval: 10s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Exporter — database metrics
+  # Replication lag, connections, transactions, WAL, checkpoints
+  # ---------------------------------------------------------------------------
+  - job_name: "postgres"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/postgres_targets.json
+        refresh_interval: 10s
+
+  # ---------------------------------------------------------------------------
+  # Patroni — native /metrics endpoint (since v2.1.0)
+  # Role, state, timeline, DCS communication, pending restart
+  # ---------------------------------------------------------------------------
+  - job_name: "patroni"
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/patroni_targets.json
+        refresh_interval: 10s
+
+  # ---------------------------------------------------------------------------
+  # Consul — consul_exporter metrics
+  # Raft commit time, KV latency, leader elections, service health
+  # ---------------------------------------------------------------------------
+  - job_name: "consul"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/consul_targets.json
+        refresh_interval: 10s
+
+  # ---------------------------------------------------------------------------
+  # HAProxy — built-in Prometheus endpoint
+  # Backend state, connection queues, response times, health checks
+  # ---------------------------------------------------------------------------
+  - job_name: "haproxy"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/haproxy_targets.json
+        refresh_interval: 10s

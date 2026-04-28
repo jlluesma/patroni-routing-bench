@@ -1,0 +1,357 @@
+###############################################################################
+# patroni-routing-bench: Combination 10 — Consul Connect + Envoy (STRETCH GOAL)
+#
+# Architecture:
+#   3x Patroni/PostgreSQL nodes (1 primary + 2 replicas)
+#   1x Consul server (DCS + Connect CA + xDS control plane)
+#   3x Envoy sidecar proxies (one per Patroni node, co-located via network_mode)
+#   1x Envoy ingress gateway (client entry point, bench-accessible on port 5432)
+#   1x Client (heartbeat via envoy-ingress port 5432)
+#   3x Observer agents (patroni ×1, pg ×1, consul ×1)
+#
+# Routing mechanism: Consul Connect service mesh (control-plane driven)
+#   - Patroni services are registered manually in consul.json with health checks
+#     on GET /primary (Patroni REST API). Only the current primary passes.
+#   - Each postgres node has an Envoy sidecar proxy co-located via network_mode.
+#     The sidecar handles inbound mTLS from the mesh and forwards clear-text to
+#     the co-located PostgreSQL process (127.0.0.1:5432 in the shared netns).
+#   - An Envoy ingress gateway listens on port 5432 on the bench network.
+#     Consul pushes an xDS update to the gateway whenever the health-check
+#     result changes — forwarding is re-pointed to the new primary within
+#     ~(inter × fall) = 6 s, with zero reload, zero connection drop on the
+#     ingress side.
+#   - A service-intentions config entry restricts postgres access:
+#     only ingress-gateway → postgres is allowed; all other paths are denied
+#     by Consul Connect's default-deny posture.
+#   - mTLS between all mesh participants is handled automatically by Consul's
+#     built-in CA (SPIFFE X.509 certificates, rotated every 72 h).
+#
+# Stretch-goal caveats — read before running:
+#   - Consul Connect in Docker requires the gRPC xDS port (8502) to be
+#     reachable from every Envoy container to the Consul server.
+#   - The ingress gateway self-registers via `consul connect envoy -register`.
+#     It needs a short sleep so Consul finishes loading config_entries first.
+#   - The envoy sidecar containers use `network_mode: "service:patroni-nodeN"`
+#     which shares the Patroni container's network namespace. They cannot
+#     declare their own `networks:` key but inherit bench + dashboard from the
+#     Patroni container.
+#   - No observer-haproxy: HAProxy is absent. Consul catalog health changes
+#     (observed by observer-consul) serve as the routing-state signal.
+#
+# Prerequisites:
+#   cd ../../../dashboard && docker compose up -d
+#
+# Usage:
+#   docker compose up -d
+#   POLL_INTERVAL_MS=50 docker compose up -d
+#
+# Ports:
+#   Envoy ingress (primary): localhost:5100  → envoy-ingress:5432
+#   HAProxy stats / Envoy:   no stats UI (use consul UI instead)
+#   Consul UI:               http://localhost:8510
+###############################################################################
+
+x-patroni-common: &patroni-common
+  build:
+    context: ../../../shared/docker/postgres-patroni
+  environment: &patroni-env
+    CONSUL_HOST: consul-server
+    CONSUL_PORT: "8500"
+    PATRONI_CONFIG: /etc/patroni/patroni.yml
+  depends_on:
+    consul-server:
+      condition: service_healthy
+
+x-observer-common: &observer-common
+  build:
+    context: ../../../tool/observers
+  environment: &observer-env
+    POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-100}"
+
+x-envoy-sidecar: &envoy-sidecar
+  build:
+    context: ./docker/consul-envoy
+  # sidecar_service_id and patroni service name are set per-service below
+
+services:
+
+  # ===========================================================================
+  # DCS: Consul Server
+  # Connect is enabled; gRPC port 8502 serves xDS to Envoy sidecars.
+  # Services (postgres-node1/2/3) and config_entries are loaded from consul.json.
+  # ===========================================================================
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: prb-10-consul
+    command: agent -server -config-file=/consul/config/consul.json -bind='{{ GetInterfaceIP "eth0" }}'
+    volumes:
+      - ./config/consul.json:/consul/config/consul.json:ro
+      - consul_data:/consul/data
+    ports:
+      - "8510:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Patroni/PostgreSQL Nodes
+  # register_service: false in patroni.yml — services are registered manually
+  # in consul.json so that connect.sidecar_service blocks can be declared.
+  # ===========================================================================
+  patroni-node1:
+    <<: *patroni-common
+    container_name: prb-10-node1
+    hostname: patroni-node1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node1:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node1:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node2:
+    <<: *patroni-common
+    container_name: prb-10-node2
+    hostname: patroni-node2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node2:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node2:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node3:
+    <<: *patroni-common
+    container_name: prb-10-node3
+    hostname: patroni-node3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node3:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node3:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Envoy Sidecar Proxies
+  #
+  # Each sidecar runs `consul connect envoy -sidecar-for <service-id>` which:
+  #   1. Fetches the auto-generated sidecar proxy registration from Consul
+  #      (ID: postgres-nodeN-sidecar-proxy, port: 2100N)
+  #   2. Generates Envoy bootstrap JSON with the Consul xDS server address
+  #   3. Starts Envoy; Consul streams ongoing xDS updates via gRPC
+  #
+  # network_mode: "service:patroni-nodeN" shares the Patroni container's
+  # network namespace so that:
+  #   - The sidecar binds on the same IP as patroni-nodeN (bench network)
+  #   - Inbound postgres traffic forwarded to 127.0.0.1:5432 (co-located PG)
+  #   - The sidecar inherits bench + dashboard networks from the Patroni node
+  #
+  # The 15s sleep gives consul-server time to fully load config_entries and
+  # issue the Connect CA certificate before Envoy requests its leaf cert.
+  # ===========================================================================
+  envoy-sidecar-node1:
+    <<: *envoy-sidecar
+    container_name: prb-10-envoy-sidecar1
+    network_mode: "service:patroni-node1"
+    command: >
+      sh -c "sleep 15 && consul connect envoy
+      -sidecar-for postgres-node1
+      -grpc-addr consul-server:8502
+      -http-addr http://consul-server:8500"
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      patroni-node1:
+        condition: service_started
+
+  envoy-sidecar-node2:
+    <<: *envoy-sidecar
+    container_name: prb-10-envoy-sidecar2
+    network_mode: "service:patroni-node2"
+    command: >
+      sh -c "sleep 15 && consul connect envoy
+      -sidecar-for postgres-node2
+      -grpc-addr consul-server:8502
+      -http-addr http://consul-server:8500"
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      patroni-node2:
+        condition: service_started
+
+  envoy-sidecar-node3:
+    <<: *envoy-sidecar
+    container_name: prb-10-envoy-sidecar3
+    network_mode: "service:patroni-node3"
+    command: >
+      sh -c "sleep 15 && consul connect envoy
+      -sidecar-for postgres-node3
+      -grpc-addr consul-server:8502
+      -http-addr http://consul-server:8500"
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      patroni-node3:
+        condition: service_started
+
+  # ===========================================================================
+  # Envoy Ingress Gateway
+  #
+  # The ingress-gateway config entry in consul.json maps:
+  #   listener port 5432 → upstream service "postgres"
+  #
+  # `consul connect envoy -gateway=ingress -register` auto-registers the
+  # gateway service in Consul and starts Envoy with the generated bootstrap.
+  # Consul's xDS server pushes endpoint updates to the gateway whenever the
+  # set of healthy `postgres` instances changes (i.e. primary failover).
+  #
+  # The client container connects to envoy-ingress:5432 on the bench network.
+  # The gateway terminates mTLS toward the postgres sidecars and forwards
+  # plain TCP to the co-located PostgreSQL process behind each sidecar.
+  # ===========================================================================
+  envoy-ingress:
+    build:
+      context: ./docker/consul-envoy
+    container_name: prb-10-envoy-ingress
+    command: >
+      sh -c "sleep 20 && consul connect envoy
+      -gateway=ingress
+      -register
+      -service ingress-gateway
+      -address $$(hostname -i):21000
+      -grpc-addr consul-server:8502
+      -http-addr http://consul-server:8500"
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      envoy-sidecar-node1:
+        condition: service_started
+      envoy-sidecar-node2:
+        condition: service_started
+      envoy-sidecar-node3:
+        condition: service_started
+    ports:
+      - "5100:5432"
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Client: Heartbeat Traffic Generator
+  # Connects to envoy-ingress:5432 — Envoy ingress gateway routes to the
+  # current Patroni primary via the Connect service mesh.
+  # ===========================================================================
+  client:
+    build:
+      context: ../../../tool/clients/failover
+    container_name: prb-10-client
+    environment:
+      PG_CONNSTRING: "host=envoy-ingress port=5432 dbname=postgres user=postgres password=postgres connect_timeout=5"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "10-consul-connect-envoy"
+      TEST_RUN_ID: ""  # Set by runner script
+      INTERVAL_MS: "100"
+    depends_on:
+      - envoy-ingress
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: Patroni REST API watchers (all 3 nodes in one container)
+  # ===========================================================================
+  observer-patroni:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-10-obs-patroni
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: "patroni-node1:http://patroni-node1:8008,patroni-node2:http://patroni-node2:8008,patroni-node3:http://patroni-node3:8008"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "10-consul-connect-envoy"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  observer-consul:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-10-obs-consul
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: http://consul-server:8500
+      CONSUL_SCOPE: bench
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "10-consul-connect-envoy"
+      NODE_NAME: consul-server
+    depends_on:
+      consul-server:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agent: PostgreSQL log watcher (all 3 nodes in one container)
+  # Three pg_logs volumes are mounted at distinct paths so WATCHER_TARGETS
+  # can point each per-node thread at its own log file.
+  # ===========================================================================
+  observer-postgres:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-10-obs-pg
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: "patroni-node1:host=patroni-node1 port=5432 dbname=postgres user=postgres password=postgres,patroni-node2:host=patroni-node2 port=5432 dbname=postgres user=postgres password=postgres,patroni-node3:host=patroni-node3 port=5432 dbname=postgres user=postgres password=postgres"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "10-consul-connect-envoy"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+volumes:
+  consul_data:
+  pg_logs_node1:
+  pg_logs_node2:
+  pg_logs_node3:
+
+networks:
+  bench:
+    name: prb-10-bench
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+  dashboard:
+    external: true
+    name: prb-dashboard

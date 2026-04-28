@@ -1,0 +1,172 @@
+###############################################################################
+# patroni-routing-bench — Measurement Tool
+#
+# Measure failover timing on YOUR Patroni cluster.
+# No changes to your infrastructure — just Docker on one machine.
+#
+# Quick start:
+#   1. cp .env.example .env && vim .env         (fill in your endpoints)
+#   2. docker compose up -d                     (TimescaleDB + observers)
+#   3. docker compose --profile failover up -d  (heartbeat client)
+#   4. Inject failure on your cluster:
+#      ssh user@leader "sudo systemctl stop patroni"
+#   5. docker compose --profile charts run --rm charts  (generate report)
+#
+# What runs where:
+#
+#   YOUR MACHINE (this compose)          YOUR CLUSTER (untouched)
+#   ┌─────────────────────────┐          ┌─────────────────────────┐
+#   │ TimescaleDB             │          │ Patroni node1           │
+#   │ observer-patroni ───────┼── HTTP ──┤ Patroni node2           │
+#   │ observer-consul  ───────┼── HTTP ──┤ Patroni node3           │
+#   │ observer-haproxy ───────┼── HTTP ──┤ Consul server           │
+#   │ client-failover  ───────┼── TCP ───┤ HAProxy / VIP / DNS     │
+#   └─────────────────────────┘          └─────────────────────────┘
+#
+# Profiles:
+#   (none)     TimescaleDB + Patroni observer + Consul observer
+#   haproxy    Adds HAProxy observer
+#   failover   Adds heartbeat client (Dimension 1: failover timing)
+#   charts     Report generation (on-demand, exits after completion)
+###############################################################################
+
+services:
+
+  # ── TimescaleDB ─────────────────────────────────────────────────────
+  # Stores all observer events and client heartbeat results.
+  # Schema is applied automatically on first start.
+  timescaledb:
+    image: timescale/timescaledb:latest-pg17
+    container_name: prb-tsdb
+    environment:
+      POSTGRES_USER: ${TSDB_USER:-bench}
+      POSTGRES_PASSWORD: ${TSDB_PASSWORD:-bench}
+      POSTGRES_DB: ${TSDB_DB:-bench}
+    ports:
+      - "${TSDB_PORT:-5433}:5432"
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+      - ./timescaledb/schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TSDB_USER:-bench}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Patroni Observer ────────────────────────────────────────────────
+  # Polls the Patroni REST API on every node. Detects:
+  #   - role_change (primary → replica, replica → primary)
+  #   - node_state_change (running, stopped, unreachable)
+  #   - timeline_change (new timeline after promotion)
+  observer-patroni:
+    build: ./observers
+    container_name: prb-obs-patroni
+    environment:
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: ${PATRONI_TARGETS}
+      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+      COMBINATION_ID: ${COMBINATION_ID:-custom}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-100}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Consul Observer ─────────────────────────────────────────────────
+  # Watches the Consul KV leader key using blocking queries. Detects:
+  #   - leader_key_deleted (leader lock lost)
+  #   - leader_key_created (new leader acquired lock)
+  #   - leader_key_change (leadership transferred)
+  observer-consul:
+    build: ./observers
+    container_name: prb-obs-consul
+    environment:
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: ${CONSUL_URL}
+      CONSUL_SCOPE: ${CONSUL_SCOPE:-bench}
+      NODE_NAME: consul
+      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+      COMBINATION_ID: ${COMBINATION_ID:-custom}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-100}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── PostgreSQL Observer (SQL-based, remote) ─────────────────────────
+  # Connects directly to each PostgreSQL node via SQL.
+  # Detects promotion (pg_is_in_recovery transitions), connection
+  # availability, and timeline changes. No local file access needed.
+  observer-postgres:
+    build: ./observers
+    container_name: prb-obs-postgres
+    environment:
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: ${PG_TARGETS}
+      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+      COMBINATION_ID: ${COMBINATION_ID:-custom}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-100}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── HAProxy Observer (optional) ─────────────────────────────────────
+  # Polls the HAProxy stats CSV endpoint. Detects:
+  #   - backend_state_change (UP → DOWN, DOWN → UP per server)
+  # Enable with: docker compose --profile haproxy up -d
+  observer-haproxy:
+    build: ./observers
+    container_name: prb-obs-haproxy
+    profiles:
+      - haproxy
+    environment:
+      OBSERVER_COMPONENT: haproxy
+      HAPROXY_STATS_URL: ${HAPROXY_STATS_URL}
+      NODE_NAME: haproxy
+      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+      COMBINATION_ID: ${COMBINATION_ID:-custom}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-100}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Heartbeat Client (Dimension 1: Failover Timing) ────────────────
+  # Sends SELECT 1 every INTERVAL_MS through the routing layer.
+  # Records success/failure with microsecond latency.
+  # Enable with: docker compose --profile failover up -d
+  client-failover:
+    build: ./clients/failover
+    container_name: prb-client
+    profiles:
+      - failover
+    environment:
+      PG_CONNSTRING: ${PG_CONNSTRING}
+      INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-100}
+      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+      COMBINATION_ID: ${COMBINATION_ID:-custom}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Chart Generation (on-demand) ────────────────────────────────────
+  # Generates interactive HTML reports from TimescaleDB data.
+  # Run with: docker compose --profile charts run --rm charts
+  charts:
+    build: ./charts
+    container_name: prb-charts
+    profiles:
+      - charts
+    volumes:
+      - ./results:/results
+    environment:
+      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  tsdb_data:

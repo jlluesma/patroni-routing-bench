@@ -1,0 +1,93 @@
+{
+  "description": "Patroni cluster metrics: role state, DCS communication, timeline, pending restarts",
+  "editable": true,
+  "panels": [
+    {
+      "title": "Patroni Primary (1 = primary)",
+      "description": "Which node is the primary at any given moment",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "patroni_primary{job=\"patroni\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "title": "Patroni Replica (1 = replica)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "patroni_replica{job=\"patroni\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "title": "Patroni Running (1 = running)",
+      "description": "Is Patroni's managed PostgreSQL instance running",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "patroni_running{job=\"patroni\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "title": "Patroni Timeline",
+      "description": "Timeline ID — increments on promotion",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "patroni_postgres_timeline{job=\"patroni\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Patroni DCS Last Seen",
+      "description": "Seconds since Patroni last communicated with DCS — spikes indicate DCS issues",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "patroni_dcs_last_seen{job=\"patroni\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Patroni Postgres State",
+      "description": "Numeric state: running, starting, stopped, etc.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "patroni_postgres_state{job=\"patroni\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["patroni", "ha", "cluster"],
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "Patroni Cluster",
+  "uid": "prb-patroni-metrics",
+  "version": 1
+}

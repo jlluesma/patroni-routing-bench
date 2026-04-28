@@ -1,0 +1,342 @@
+###############################################################################
+# patroni-routing-bench: Combination 03 — vip-manager VIP Polling
+#
+# Architecture:
+#   3x Patroni/PostgreSQL nodes (1 primary + 2 replicas)
+#   1x Consul server (DCS only — no DNS, no service catalog health checks)
+#   3x vip-manager sidecars (one per node, share node's network namespace)
+#   1x Client (connects directly to VIP 172.30.3.100:5432)
+#   5x Observer agents (patroni ×1, pg ×1, consul ×1, vip ×3)
+#
+# Routing mechanism: floating VIP managed by vip-manager
+#   - Each vip-manager polls Consul KV /service/bench/leader every 1 s
+#   - When the key value matches this node's name, vip-manager binds
+#     172.30.3.100/24 to eth0 (shared with the Patroni node via network_mode)
+#   - When the key value no longer matches, vip-manager removes the VIP
+#   - The client connects to 172.30.3.100 — traffic always reaches the leader
+#
+# VIP binding requires NET_ADMIN capability on the vip-manager container.
+# vip-manager uses `network_mode: service:patroni-nodeN` to share the node's
+# network namespace so the VIP is added to the Patroni node's interface.
+#
+# The dashboard stack (TimescaleDB + Prometheus + Grafana) runs separately.
+# Start it first: cd ../../../dashboard && docker compose up -d
+#
+# Usage:
+#   docker compose up -d                     # default observer poll = 100ms
+#   POLL_INTERVAL_MS=50 docker compose up -d # finer resolution
+#
+# Observer poll interval: adjust POLL_INTERVAL_MS to change
+# measurement precision. Tested values: 50ms, 100ms, 200ms
+#
+# Ports:
+#   Consul UI: localhost:8503  (offset to allow parallel runs with 01/02/06)
+###############################################################################
+
+x-patroni-common: &patroni-common
+  build:
+    context: ../../../shared/docker/postgres-patroni
+  environment: &patroni-env
+    CONSUL_HOST: consul-server
+    CONSUL_PORT: "8500"
+    PATRONI_CONFIG: /etc/patroni/patroni.yml
+  volumes:
+    - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+  depends_on:
+    consul-server:
+      condition: service_healthy
+
+x-observer-common: &observer-common
+  build:
+    context: ../../../tool/observers
+  environment: &observer-env
+    POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-100}"
+
+services:
+
+  # ===========================================================================
+  # DCS: Consul Server
+  # ===========================================================================
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: prb-03-consul
+    command: agent -server -config-file=/consul/config/consul.json -bind='{{ GetInterfaceIP "eth0" }}'
+    volumes:
+      - ./config/consul.json:/consul/config/consul.json:ro
+      - consul_data:/consul/data
+    ports:
+      - "8503:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      bench:
+        ipv4_address: 172.30.3.2
+      dashboard:
+
+  # ===========================================================================
+  # Patroni/PostgreSQL Nodes
+  # ===========================================================================
+  patroni-node1:
+    <<: *patroni-common
+    container_name: prb-03-node1
+    hostname: patroni-node1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node1:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node1:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node2:
+    <<: *patroni-common
+    container_name: prb-03-node2
+    hostname: patroni-node2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node2:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node2:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node3:
+    <<: *patroni-common
+    container_name: prb-03-node3
+    hostname: patroni-node3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node3:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node3:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # VIP Manager Sidecars (one per node, shares node's network namespace)
+  # Each polls Consul KV /service/bench/leader; binds 172.30.3.100 when leader
+  # ===========================================================================
+  vip-manager-node1:
+    build:
+      context: ./docker/vip-manager
+    container_name: prb-03-vip1
+    network_mode: "service:patroni-node1"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./config/vip-manager-node1.yml:/etc/vip-manager/vip-manager.yml:ro
+    command: ["--config", "/etc/vip-manager/vip-manager.yml"]
+    restart: always
+    depends_on:
+      - patroni-node1
+      - consul-server
+
+  vip-manager-node2:
+    build:
+      context: ./docker/vip-manager
+    container_name: prb-03-vip2
+    network_mode: "service:patroni-node2"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./config/vip-manager-node2.yml:/etc/vip-manager/vip-manager.yml:ro
+    command: ["--config", "/etc/vip-manager/vip-manager.yml"]
+    restart: always
+    depends_on:
+      - patroni-node2
+      - consul-server
+
+  vip-manager-node3:
+    build:
+      context: ./docker/vip-manager
+    container_name: prb-03-vip3
+    network_mode: "service:patroni-node3"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./config/vip-manager-node3.yml:/etc/vip-manager/vip-manager.yml:ro
+    command: ["--config", "/etc/vip-manager/vip-manager.yml"]
+    restart: always
+    depends_on:
+      - patroni-node3
+      - consul-server
+
+  # ===========================================================================
+  # Client: Heartbeat Traffic Generator (connects to VIP)
+  # ===========================================================================
+  client:
+    build:
+      context: ../../../tool/clients/failover
+    container_name: prb-03-client
+    environment:
+      PG_CONNSTRING: "host=172.30.3.100 port=5432 dbname=postgres user=postgres password=postgres connect_timeout=5"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+      TEST_RUN_ID: ""  # Set by runner script
+      INTERVAL_MS: "100"
+    user: "0"
+    entrypoint: >
+      sh -c "
+        echo 1000 > /proc/sys/net/ipv4/neigh/eth0/base_reachable_time_ms;
+        echo 1 > /proc/sys/net/ipv4/neigh/eth0/gc_stale_time;
+        exec python3 /app/heartbeat.py
+      "
+    cap_add:
+      - NET_ADMIN
+    privileged: true
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: Patroni REST API watchers (all 3 nodes in one container)
+  # ===========================================================================
+  observer-patroni:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-03-obs-patroni
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: "patroni-node1:http://patroni-node1:8008,patroni-node2:http://patroni-node2:8008,patroni-node3:http://patroni-node3:8008"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  observer-consul:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-03-obs-consul
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: http://consul-server:8500
+      CONSUL_SCOPE: bench
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+      NODE_NAME: consul-server
+    depends_on:
+      consul-server:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: VIP state watchers (share each node's network namespace
+  # so they can run `ip addr show eth0` and detect VIP bind/unbind events)
+  # ===========================================================================
+  observer-vip-node1:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-03-obs-vip1
+    network_mode: "service:patroni-node1"
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: vip
+      VIP_ADDRESS: "172.30.3.100"
+      VIP_INTERFACE: eth0
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+      NODE_NAME: patroni-node1
+    restart: always
+    depends_on:
+      - patroni-node1
+
+  observer-vip-node2:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-03-obs-vip2
+    network_mode: "service:patroni-node2"
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: vip
+      VIP_ADDRESS: "172.30.3.100"
+      VIP_INTERFACE: eth0
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+      NODE_NAME: patroni-node2
+    restart: always
+    depends_on:
+      - patroni-node2
+
+  observer-vip-node3:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-03-obs-vip3
+    network_mode: "service:patroni-node3"
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: vip
+      VIP_ADDRESS: "172.30.3.100"
+      VIP_INTERFACE: eth0
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+      NODE_NAME: patroni-node3
+    restart: always
+    depends_on:
+      - patroni-node3
+
+  # ===========================================================================
+  # Observer Agent: PostgreSQL log watcher (all 3 nodes in one container)
+  # Three pg_logs volumes are mounted at distinct paths so WATCHER_TARGETS
+  # can point each per-node thread at its own log file.
+  # ===========================================================================
+  observer-postgres:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-03-obs-pg
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: "patroni-node1:host=patroni-node1 port=5432 dbname=postgres user=postgres password=postgres,patroni-node2:host=patroni-node2 port=5432 dbname=postgres user=postgres password=postgres,patroni-node3:host=patroni-node3 port=5432 dbname=postgres user=postgres password=postgres"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "03-vip-manager-poll"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+volumes:
+  consul_data:
+  pg_logs_node1:
+  pg_logs_node2:
+  pg_logs_node3:
+
+networks:
+  bench:
+    name: prb-03-bench
+    ipam:
+      config:
+        - subnet: 172.30.3.0/24
+  dashboard:
+    external: true
+    name: prb-dashboard

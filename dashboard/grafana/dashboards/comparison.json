@@ -1,0 +1,92 @@
+{
+  "description": "Compare failover performance across all routing combinations",
+  "editable": true,
+  "panels": [
+    {
+      "title": "Average Downtime by Combination",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT combination_id AS \"Combination\", avg_downtime_ms AS \"Avg Downtime (ms)\", min_downtime_ms AS \"Min (ms)\", max_downtime_ms AS \"Max (ms)\" FROM combination_comparison WHERE dcs = '$dcs' AND provider = '$provider' AND failover_type = '$failover_type' ORDER BY avg_downtime_ms",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" }
+      }
+    },
+    {
+      "title": "Downtime Distribution (Box Plot)",
+      "description": "Spread of downtime across multiple test runs per combination",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT combination_id AS \"Combination\", avg_downtime_ms AS \"Avg (ms)\", stddev_downtime_ms AS \"StdDev (ms)\", min_downtime_ms AS \"Min (ms)\", max_downtime_ms AS \"Max (ms)\", test_runs AS \"Runs\" FROM combination_comparison WHERE dcs = '$dcs' AND provider = '$provider' AND failover_type = '$failover_type' ORDER BY avg_downtime_ms",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "title": "Failed Queries per Combination",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT combination_id AS \"Combination\", avg_failed_queries AS \"Avg Failed Queries\" FROM combination_comparison WHERE dcs = '$dcs' AND provider = '$provider' AND failover_type = '$failover_type' ORDER BY avg_failed_queries",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "title": "All Test Runs — Raw Data",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT fw.combination_id AS \"Combination\", fw.test_run_id AS \"Test Run\", fw.downtime_ms AS \"Downtime (ms)\", fw.total_failures AS \"Failed\", fw.total_successes AS \"Success\", tr.failover_type AS \"Failover Type\", tr.provider AS \"Provider\" FROM failover_window fw JOIN test_runs tr ON tr.id = fw.test_run_id WHERE tr.dcs = '$dcs' ORDER BY fw.combination_id, tr.started_at DESC",
+          "format": "table"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["patroni", "comparison", "benchmark"],
+  "templating": {
+    "list": [
+      {
+        "name": "dcs",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+        "query": "SELECT DISTINCT dcs FROM test_runs ORDER BY dcs",
+        "current": { "text": "consul", "value": "consul" },
+        "refresh": 2
+      },
+      {
+        "name": "provider",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+        "query": "SELECT DISTINCT provider FROM test_runs WHERE dcs = '$dcs' ORDER BY provider",
+        "current": { "text": "local", "value": "local" },
+        "refresh": 2
+      },
+      {
+        "name": "failover_type",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "prb-timescaledb" },
+        "query": "SELECT DISTINCT failover_type FROM test_runs WHERE dcs = '$dcs' AND provider = '$provider' ORDER BY failover_type",
+        "current": {},
+        "refresh": 2
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "title": "Combination Comparison",
+  "uid": "prb-comparison",
+  "version": 1
+}

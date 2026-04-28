@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["patroni-node1:8008", "patroni-node2:8008", "patroni-node3:8008"],
+    "labels": {
+      "combination": "06-haproxy-rest-polling",
+      "env": "bench"
+    }
+  }
+]

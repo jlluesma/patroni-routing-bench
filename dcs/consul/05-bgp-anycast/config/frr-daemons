@@ -1,0 +1,19 @@
+# FRR daemons configuration
+# Only zebra (kernel routing) and bgpd are needed for this combination.
+bgpd=yes
+zebra=yes
+ospfd=no
+ospf6d=no
+ripd=no
+ripngd=no
+isisd=no
+pimd=no
+ldpd=no
+nhrpd=no
+eigrpd=no
+babeld=no
+sharpd=no
+pbrd=no
+bfdd=no
+fabricd=no
+vrrpd=no

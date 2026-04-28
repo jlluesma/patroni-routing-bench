@@ -1,0 +1,117 @@
+###############################################################################
+# patroni-routing-bench: Dashboard Stack
+# TimescaleDB (failover timing) + Prometheus (infra metrics) + Grafana
+#
+# This runs independently of the test combinations.
+# Start it once, and all test runs push data here.
+#
+# Usage:
+#   docker compose up -d
+#
+# Access:
+#   Grafana:     http://localhost:3000  (admin/admin)
+#   Prometheus:  http://localhost:9090
+#   TimescaleDB: localhost:5433         (bench/bench, db: bench)
+###############################################################################
+
+services:
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg17
+    container_name: prb-timescaledb
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    ports:
+      - "5433:5432"
+    volumes:
+      # Schema migrations — executed in alphabetical order on first start
+      - ../tool/timescaledb/schema/001_create_events.sql:/docker-entrypoint-initdb.d/001_create_events.sql:ro
+      - ../tool/timescaledb/schema/002_create_hypertable.sql:/docker-entrypoint-initdb.d/002_create_hypertable.sql:ro
+      - ../tool/timescaledb/schema/003_create_views.sql:/docker-entrypoint-initdb.d/003_create_views.sql:ro
+      - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/000_init.sql:ro
+      # Persistent data
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - dashboard
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prb-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    networks:
+      - dashboard
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: prb-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Auto-provision datasource and dashboards
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/failover-timeline.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - dashboard
+
+  # =========================================================================
+  # Charts: Publication-ready chart generation (on-demand)
+  # Usage: docker compose --profile charts run charts --combination-id 06-haproxy-rest-polling
+  # =========================================================================
+  charts:
+    build: ./charts
+    container_name: prb-charts
+    profiles: ["charts"]
+    environment:
+      TIMESCALE_HOST: timescaledb
+      TIMESCALE_PORT: "5432"
+      TIMESCALE_DB: bench
+      TIMESCALE_USER: bench
+      TIMESCALE_PASSWORD: bench
+    volumes:
+      - ./charts/output:/app/output
+      - ../runner/results:/results
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - dashboard
+
+volumes:
+  timescaledb_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  dashboard:
+    name: prb-dashboard

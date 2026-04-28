@@ -1,0 +1,64 @@
+{{- /* haproxy.cfg — rendered by consul-template, do not edit manually */ -}}
+{{- /* Reloaded via master CLI socket at /var/run/haproxy/master.sock */ -}}
+{{- /* "any" status ensures all 3 nodes appear even when a node is unhealthy.  */ -}}
+{{- /* HAProxy's own httpchk determines which backend actually receives traffic. */ -}}
+
+global
+    maxconn 1000
+    log stdout format raw local0
+    stats socket /var/run/haproxy/admin.sock mode 660 level admin
+
+defaults
+    mode tcp
+    log global
+    option log-health-checks
+    retries 3
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+    timeout check 2s
+
+# ---------------------------------------------------------------------------
+# Stats & Prometheus endpoint
+# ---------------------------------------------------------------------------
+frontend stats
+    bind *:8404
+    mode http
+    http-request use-service prometheus-exporter if { path /metrics }
+    stats enable
+    stats uri /stats
+    stats refresh 5s
+    stats show-legends
+
+# ---------------------------------------------------------------------------
+# Primary (read-write) — port 5000
+# Routes to whichever node responds 200 on /primary
+# ---------------------------------------------------------------------------
+frontend primary_frontend
+    bind *:5000
+    default_backend primary_backend
+
+backend primary_backend
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+{{range service "bench" "any"}}
+    server {{.Address}} {{.Address}}:5432 check port 8008
+{{- end}}
+
+# ---------------------------------------------------------------------------
+# Replicas (read-only) — port 5001
+# Routes to nodes that respond 200 on /replica
+# ---------------------------------------------------------------------------
+frontend replica_frontend
+    bind *:5001
+    default_backend replica_backend
+
+backend replica_backend
+    option httpchk GET /replica
+    http-check expect status 200
+    balance roundrobin
+    default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+{{range service "bench" "any"}}
+    server {{.Address}} {{.Address}}:5432 check port 8008
+{{- end}}

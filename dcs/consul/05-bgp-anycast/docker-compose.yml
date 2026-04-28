@@ -1,0 +1,384 @@
+###############################################################################
+# patroni-routing-bench: Combination 05 — BGP Anycast
+#
+# Architecture:
+#   3x Patroni/PostgreSQL nodes — static IPs 172.32.0.11-13
+#   1x Consul server (DCS only)
+#   1x FRR router (eBGP route receiver + proxy-ARP)
+#   3x ExaBGP sidecars (one per node, share node's network namespace)
+#   1x Client (connects to VIP 172.32.0.100 on bench network)
+#   5x Observer agents (patroni ×1, pg ×1, consul ×1, vip ×3)
+#
+# Routing mechanism: BGP Anycast
+#   - Each Patroni node has a static IP on the bench network (172.32.0.11-13)
+#   - FRR (172.32.0.1) peers with each node's ExaBGP sidecar via eBGP
+#     (Patroni AS 65001, FRR AS 65000; hold-time 10 s)
+#   - On promotion, bgp_callback.sh:
+#       1. Binds 172.32.0.100/32 on the node's loopback (lo)
+#       2. Writes "announce route 172.32.0.100/32 next-hop self" to the
+#          ExaBGP FIFO, which ExaBGP forwards to FRR via BGP UPDATE
+#   - FRR installs the kernel route and proxy-ARPs for 172.32.0.100:
+#       Client ARPs for 172.32.0.100 → FRR replies with its MAC
+#       → packet forwarded to current leader → accepted (VIP on loopback)
+#   - On demotion or crash, ExaBGP withdraws the route (or FRR's 10 s
+#     hold-timer fires if the node crashes) → FRR stops proxy-ARPing
+#
+# Shared volumes per node:
+#   exabgp_nodeN_run: /run/exabgp — FIFO shared between Patroni callback and
+#                     ExaBGP sidecar
+#
+# Note: ExaBGP sidecars use network_mode: service:patroni-nodeN to share the
+# node's network namespace, giving them the node's static IP as local-address
+# for the BGP session. Observer-vip containers also share the namespace to
+# detect when 172.32.0.100 appears on lo.
+#
+# The dashboard stack (TimescaleDB + Prometheus + Grafana) runs separately.
+# Start it first: cd ../../../dashboard && docker compose up -d
+#
+# Prerequisites:
+#   chmod +x config/exabgp-run.sh config/bgp_callback.sh
+#
+# Usage:
+#   docker compose up -d                     # default observer poll = 100ms
+#   POLL_INTERVAL_MS=50 docker compose up -d # finer resolution
+#
+# Ports:
+#   Consul UI: localhost:8505
+###############################################################################
+
+x-patroni-common: &patroni-common
+  build:
+    context: ../../../shared/docker/postgres-patroni
+  environment: &patroni-env
+    CONSUL_HOST: consul-server
+    CONSUL_PORT: "8500"
+    PATRONI_CONFIG: /etc/patroni/patroni.yml
+  cap_add:
+    - NET_ADMIN
+  depends_on:
+    consul-server:
+      condition: service_healthy
+
+x-observer-common: &observer-common
+  build:
+    context: ../../../tool/observers
+  environment: &observer-env
+    POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-100}"
+
+services:
+
+  # ===========================================================================
+  # DCS: Consul Server
+  # ===========================================================================
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: prb-05-consul
+    command: agent -server -config-file=/consul/config/consul.json -bind='{{ GetInterfaceIP "eth0" }}'
+    volumes:
+      - ./config/consul.json:/consul/config/consul.json:ro
+      - consul_data:/consul/data
+    ports:
+      - "8505:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # BGP Router: FRRouting
+  # Accepts eBGP sessions from ExaBGP on all 3 nodes.
+  # proxy_arp sysctl makes FRR answer ARP requests for any IP it has a route
+  # to — so the VIP (172.32.0.100/32 learned from ExaBGP) is reachable on the
+  # flat bench network without a separate routing domain.
+  # ===========================================================================
+  frr:
+    image: frrouting/frr:latest
+    container_name: prb-05-frr
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    sysctls:
+      net.ipv4.conf.all.proxy_arp: "1"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./config/frr.conf:/etc/frr/frr.conf:ro
+      - ./config/frr-daemons:/etc/frr/daemons:ro
+    networks:
+      bench:
+        ipv4_address: 172.32.0.1
+      dashboard:
+
+  # ===========================================================================
+  # Patroni/PostgreSQL Nodes — static IPs required for ExaBGP local-address
+  # NET_ADMIN: ip addr add/del on loopback (VIP binding in bgp_callback.sh)
+  # ===========================================================================
+  patroni-node1:
+    <<: *patroni-common
+    container_name: prb-05-node1
+    hostname: patroni-node1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node1:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./config/bgp_callback.sh:/usr/local/bin/bgp_callback.sh:ro
+      - pg_logs_node1:/var/log/postgresql
+      - exabgp_node1_run:/run/exabgp
+    networks:
+      bench:
+        ipv4_address: 172.32.0.11
+      dashboard:
+
+  patroni-node2:
+    <<: *patroni-common
+    container_name: prb-05-node2
+    hostname: patroni-node2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node2:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./config/bgp_callback.sh:/usr/local/bin/bgp_callback.sh:ro
+      - pg_logs_node2:/var/log/postgresql
+      - exabgp_node2_run:/run/exabgp
+    networks:
+      bench:
+        ipv4_address: 172.32.0.12
+      dashboard:
+
+  patroni-node3:
+    <<: *patroni-common
+    container_name: prb-05-node3
+    hostname: patroni-node3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node3:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./config/bgp_callback.sh:/usr/local/bin/bgp_callback.sh:ro
+      - pg_logs_node3:/var/log/postgresql
+      - exabgp_node3_run:/run/exabgp
+    networks:
+      bench:
+        ipv4_address: 172.32.0.13
+      dashboard:
+
+  # ===========================================================================
+  # ExaBGP Sidecars — share each Patroni node's network namespace.
+  # local-address in the ExaBGP config resolves to the node's static IP.
+  # A shared volume (exabgp_nodeN_run) provides the FIFO that the Patroni
+  # callback writes to and ExaBGP's process script reads from.
+  # ===========================================================================
+  exabgp-node1:
+    build:
+      context: ./docker/exabgp
+    container_name: prb-05-exabgp1
+    network_mode: "service:patroni-node1"
+    command: ["/etc/exabgp/exabgp-node1.conf"]
+    volumes:
+      - ./config/exabgp-node1.conf:/etc/exabgp/exabgp-node1.conf:ro
+      - ./config/exabgp-run.sh:/etc/exabgp/exabgp-run.sh:ro
+      - exabgp_node1_run:/run/exabgp
+    depends_on:
+      - patroni-node1
+      - frr
+
+  exabgp-node2:
+    build:
+      context: ./docker/exabgp
+    container_name: prb-05-exabgp2
+    network_mode: "service:patroni-node2"
+    command: ["/etc/exabgp/exabgp-node2.conf"]
+    volumes:
+      - ./config/exabgp-node2.conf:/etc/exabgp/exabgp-node2.conf:ro
+      - ./config/exabgp-run.sh:/etc/exabgp/exabgp-run.sh:ro
+      - exabgp_node2_run:/run/exabgp
+    depends_on:
+      - patroni-node2
+      - frr
+
+  exabgp-node3:
+    build:
+      context: ./docker/exabgp
+    container_name: prb-05-exabgp3
+    network_mode: "service:patroni-node3"
+    command: ["/etc/exabgp/exabgp-node3.conf"]
+    volumes:
+      - ./config/exabgp-node3.conf:/etc/exabgp/exabgp-node3.conf:ro
+      - ./config/exabgp-run.sh:/etc/exabgp/exabgp-run.sh:ro
+      - exabgp_node3_run:/run/exabgp
+    depends_on:
+      - patroni-node3
+      - frr
+
+  # ===========================================================================
+  # Client: Heartbeat Traffic Generator
+  # Connects to 172.32.0.100:5432. FRR proxy-ARPs for the VIP and routes
+  # traffic to whichever node has announced the BGP route.
+  # ===========================================================================
+  client:
+    build:
+      context: ../../../tool/clients/failover
+    container_name: prb-05-client
+    environment:
+      PG_CONNSTRING: "host=172.32.0.100 port=5432 dbname=postgres user=postgres password=postgres connect_timeout=5"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+      TEST_RUN_ID: ""  # Set by runner script
+      INTERVAL_MS: "100"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: Patroni REST API watchers (all 3 nodes in one container)
+  # ===========================================================================
+  observer-patroni:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-05-obs-patroni
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: "patroni-node1:http://patroni-node1:8008,patroni-node2:http://patroni-node2:8008,patroni-node3:http://patroni-node3:8008"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  observer-consul:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-05-obs-consul
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: http://consul-server:8500
+      CONSUL_SCOPE: bench
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+      NODE_NAME: consul-server
+    depends_on:
+      consul-server:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: VIP state watchers
+  # Share each node's network namespace to detect when 172.32.0.100 appears
+  # on lo (the loopback). VIP_INTERFACE=lo because that is where
+  # bgp_callback.sh binds the VIP (ip addr add 172.32.0.100/32 dev lo).
+  # Reaches TimescaleDB via the node's shared network namespace (dashboard
+  # network is also visible inside the shared namespace).
+  # ===========================================================================
+  observer-vip-node1:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-05-obs-vip1
+    network_mode: "service:patroni-node1"
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: vip
+      VIP_ADDRESS: "172.32.0.100"
+      VIP_INTERFACE: lo
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+      NODE_NAME: patroni-node1
+    depends_on:
+      - patroni-node1
+
+  observer-vip-node2:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-05-obs-vip2
+    network_mode: "service:patroni-node2"
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: vip
+      VIP_ADDRESS: "172.32.0.100"
+      VIP_INTERFACE: lo
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+      NODE_NAME: patroni-node2
+    depends_on:
+      - patroni-node2
+
+  observer-vip-node3:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-05-obs-vip3
+    network_mode: "service:patroni-node3"
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: vip
+      VIP_ADDRESS: "172.32.0.100"
+      VIP_INTERFACE: lo
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+      NODE_NAME: patroni-node3
+    depends_on:
+      - patroni-node3
+
+  # ===========================================================================
+  # Observer Agent: PostgreSQL log watcher (all 3 nodes in one container)
+  # Three pg_logs volumes are mounted at distinct paths so WATCHER_TARGETS
+  # can point each per-node thread at its own log file.
+  # ===========================================================================
+  observer-postgres:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-05-obs-pg
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: "patroni-node1:host=patroni-node1 port=5432 dbname=postgres user=postgres password=postgres,patroni-node2:host=patroni-node2 port=5432 dbname=postgres user=postgres password=postgres,patroni-node3:host=patroni-node3 port=5432 dbname=postgres user=postgres password=postgres"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "05-bgp-anycast"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+volumes:
+  consul_data:
+  exabgp_node1_run:
+  exabgp_node2_run:
+  exabgp_node3_run:
+  pg_logs_node1:
+  pg_logs_node2:
+  pg_logs_node3:
+
+networks:
+  bench:
+    name: prb-05-bench
+    ipam:
+      config:
+        - subnet: 172.32.0.0/24
+  dashboard:
+    external: true
+    name: prb-dashboard

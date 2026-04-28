@@ -1,0 +1,92 @@
+{
+  "description": "HAProxy routing metrics: backend state transitions, connection queues, health check results",
+  "editable": true,
+  "panels": [
+    {
+      "title": "Backend Server Status (1 = UP)",
+      "description": "Shows exactly when HAProxy detects backend state changes during failover",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "haproxy_server_status{job=\"haproxy\"}",
+          "legendFormat": "{{proxy}} / {{server}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "title": "Current Sessions",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "haproxy_server_current_sessions{job=\"haproxy\"}",
+          "legendFormat": "{{proxy}} / {{server}}"
+        }
+      ]
+    },
+    {
+      "title": "Connection Queue",
+      "description": "Queued connections — spikes during failover when backend is down",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "haproxy_server_current_queue{job=\"haproxy\"}",
+          "legendFormat": "{{proxy}} / {{server}}"
+        }
+      ]
+    },
+    {
+      "title": "HTTP Responses by Code (per second)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "rate(haproxy_server_http_responses_total{job=\"haproxy\"}[$__rate_interval])",
+          "legendFormat": "{{proxy}}/{{server}} {{code}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "title": "Connection Errors",
+      "description": "Failed connections to backends — direct indicator of routing failure",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "rate(haproxy_server_connection_errors_total{job=\"haproxy\"}[$__rate_interval])",
+          "legendFormat": "{{proxy}} / {{server}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "errors/s" } }
+    },
+    {
+      "title": "Health Check Duration",
+      "description": "Time for HAProxy health checks to complete — varies by combination",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "haproxy_server_check_duration_seconds{job=\"haproxy\"}",
+          "legendFormat": "{{proxy}} / {{server}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["patroni", "haproxy", "routing"],
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "HAProxy Routing",
+  "uid": "prb-haproxy-metrics",
+  "version": 1
+}

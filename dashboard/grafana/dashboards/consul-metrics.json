@@ -1,0 +1,94 @@
+{
+  "description": "Consul DCS metrics: Raft commit time, KV operations, leader elections, service health checks",
+  "editable": true,
+  "panels": [
+    {
+      "title": "Consul Raft Commit Time",
+      "description": "Time to commit a Raft log entry — spikes during leader election",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "consul_raft_commitTime{job=\"consul\"}",
+          "legendFormat": "{{instance}} ({{quantile}})"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "title": "Consul Raft Leader Last Contact",
+      "description": "Milliseconds since the leader last contacted followers",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "consul_raft_leader_lastContact{job=\"consul\"}",
+          "legendFormat": "{{instance}} ({{quantile}})"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "title": "Consul KV Apply Time",
+      "description": "Time to apply a KV operation — relevant for leader key updates",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "consul_kvs_apply{job=\"consul\"}",
+          "legendFormat": "{{instance}} ({{quantile}})"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "title": "Consul Raft State",
+      "description": "1 = leader, 0 = follower — shows Consul leader changes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "consul_raft_state_leader{job=\"consul\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "title": "Consul Health Checks Passing",
+      "description": "Number of health checks in passing state per service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "consul_health_service_status{job=\"consul\", status=\"passing\"}",
+          "legendFormat": "{{service_name}} passing"
+        }
+      ]
+    },
+    {
+      "title": "Consul Health Checks Critical",
+      "description": "Health checks failing — indicates node detected as down",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "consul_health_service_status{job=\"consul\", status=\"critical\"}",
+          "legendFormat": "{{service_name}} critical"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["patroni", "consul", "dcs"],
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "Consul DCS",
+  "uid": "prb-consul-metrics",
+  "version": 1
+}

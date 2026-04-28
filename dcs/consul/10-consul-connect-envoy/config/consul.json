@@ -1,0 +1,128 @@
+{
+  "server": true,
+  "bootstrap_expect": 1,
+  "ui_config": {
+    "enabled": true
+  },
+  "client_addr": "0.0.0.0",
+  "data_dir": "/consul/data",
+  "log_level": "DEBUG",
+  "enable_local_script_checks": true,
+  "telemetry": {
+    "prometheus_retention_time": "60s"
+  },
+
+  "connect": {
+    "enabled": true
+  },
+  "ports": {
+    "grpc": 8502
+  },
+
+  "services": [
+    {
+      "id": "postgres-node1",
+      "name": "postgres",
+      "address": "patroni-node1",
+      "port": 5432,
+      "tags": ["node1"],
+      "checks": [
+        {
+          "id": "postgres-node1-primary",
+          "name": "Patroni /primary health check",
+          "http": "http://patroni-node1:8008/primary",
+          "interval": "2s",
+          "timeout": "2s",
+          "deregister_critical_service_after": "60s"
+        }
+      ],
+      "connect": {
+        "sidecar_service": {
+          "port": 21001,
+          "proxy": {}
+        }
+      }
+    },
+    {
+      "id": "postgres-node2",
+      "name": "postgres",
+      "address": "patroni-node2",
+      "port": 5432,
+      "tags": ["node2"],
+      "checks": [
+        {
+          "id": "postgres-node2-primary",
+          "name": "Patroni /primary health check",
+          "http": "http://patroni-node2:8008/primary",
+          "interval": "2s",
+          "timeout": "2s",
+          "deregister_critical_service_after": "60s"
+        }
+      ],
+      "connect": {
+        "sidecar_service": {
+          "port": 21002,
+          "proxy": {}
+        }
+      }
+    },
+    {
+      "id": "postgres-node3",
+      "name": "postgres",
+      "address": "patroni-node3",
+      "port": 5432,
+      "tags": ["node3"],
+      "checks": [
+        {
+          "id": "postgres-node3-primary",
+          "name": "Patroni /primary health check",
+          "http": "http://patroni-node3:8008/primary",
+          "interval": "2s",
+          "timeout": "2s",
+          "deregister_critical_service_after": "60s"
+        }
+      ],
+      "connect": {
+        "sidecar_service": {
+          "port": 21003,
+          "proxy": {}
+        }
+      }
+    }
+  ],
+
+  "config_entries": {
+    "bootstrap": [
+      {
+        "kind": "service-defaults",
+        "name": "postgres",
+        "protocol": "tcp"
+      },
+      {
+        "kind": "ingress-gateway",
+        "name": "ingress-gateway",
+        "listeners": [
+          {
+            "port": 5432,
+            "protocol": "tcp",
+            "services": [
+              {
+                "name": "postgres"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "service-intentions",
+        "name": "postgres",
+        "sources": [
+          {
+            "name": "ingress-gateway",
+            "action": "allow"
+          }
+        ]
+      }
+    ]
+  }
+}

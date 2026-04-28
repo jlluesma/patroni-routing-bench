@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["postgres-exporter-node1:9187", "postgres-exporter-node2:9187", "postgres-exporter-node3:9187"],
+    "labels": {
+      "combination": "06-haproxy-rest-polling",
+      "env": "bench"
+    }
+  }
+]

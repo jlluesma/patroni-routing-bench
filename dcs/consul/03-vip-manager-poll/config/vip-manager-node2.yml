@@ -1,0 +1,9 @@
+ip: "172.30.3.100"
+netmask: 24
+iface: "eth0"
+trigger-key: "/service/bench/leader"
+trigger-value: "patroni-node2"
+dcs-endpoints:
+  - "http://172.30.3.2:8500"
+dcs-type: "consul"
+interval: 1000

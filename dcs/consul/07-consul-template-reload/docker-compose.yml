@@ -1,0 +1,323 @@
+###############################################################################
+# patroni-routing-bench: Combination 07 — consul-template HAProxy Reload
+#
+# Architecture:
+#   3x Patroni/PostgreSQL nodes (1 primary + 2 replicas)
+#   1x Consul server (DCS + service catalog)
+#   1x HAProxy (master-worker mode, config managed by consul-template)
+#   1x consul-template sidecar (watches Consul, renders and reloads HAProxy)
+#   1x Client (heartbeat traffic generator via HAProxy port 5000)
+#   4x Observer agents (patroni ×1, pg ×1, consul ×1, haproxy ×1)
+#
+# Routing mechanism: consul-template → HAProxy config reload
+#   - Patroni registers itself in Consul as the "bench" service
+#   - consul-template watches the Consul service catalog for "bench" changes
+#   - On change: re-renders haproxy.cfg.ctmpl → haproxy.cfg, then sends SIGHUP
+#   - HAProxy (master-worker mode) reloads config, drains old workers
+#   - HAProxy's own httpchk GET /primary still determines backend health
+#
+# Key difference vs combo 06:
+#   - Combo 06: static haproxy.cfg, HAProxy polls /primary every 2 s
+#   - Combo 07: dynamic haproxy.cfg, reload triggered by Consul catalog change
+#
+# Startup order: consul-server → patroni nodes → consul-template (renders
+# haproxy.cfg) → haproxy (starts after config exists)
+#
+# Shared volumes:
+#   haproxy_config: /usr/local/etc/haproxy — haproxy.cfg written by consul-template
+#   haproxy_run:    /run/haproxy           — PID file shared for SIGHUP reload
+#
+# PID namespace: consul-template uses pid: "service:haproxy" so it can signal
+# the HAProxy master process by PID across the container boundary.
+#
+# The dashboard stack (TimescaleDB + Prometheus + Grafana) runs separately.
+# Start it first: cd ../../../dashboard && docker compose up -d
+#
+# Usage:
+#   docker compose up -d                     # default observer poll = 100ms
+#   POLL_INTERVAL_MS=50 docker compose up -d # finer resolution
+#
+# Ports:
+#   HAProxy primary:  localhost:5007
+#   HAProxy replicas: localhost:5008
+#   HAProxy stats:    localhost:8407/stats
+#   Consul UI:        localhost:8507
+###############################################################################
+
+x-patroni-common: &patroni-common
+  build:
+    context: ../../../shared/docker/postgres-patroni
+  environment: &patroni-env
+    CONSUL_HOST: consul-server
+    CONSUL_PORT: "8500"
+    PATRONI_CONFIG: /etc/patroni/patroni.yml
+  volumes:
+    - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+  depends_on:
+    consul-server:
+      condition: service_healthy
+
+x-observer-common: &observer-common
+  build:
+    context: ../../../tool/observers
+  environment: &observer-env
+    POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-100}"
+
+services:
+
+  # ===========================================================================
+  # DCS: Consul Server
+  # ===========================================================================
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: prb-07-consul
+    command: agent -server -config-file=/consul/config/consul.json -bind='{{ GetInterfaceIP "eth0" }}'
+    volumes:
+      - ./config/consul.json:/consul/config/consul.json:ro
+      - consul_data:/consul/data
+    ports:
+      - "8507:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Patroni/PostgreSQL Nodes
+  # ===========================================================================
+  patroni-node1:
+    <<: *patroni-common
+    container_name: prb-07-node1
+    hostname: patroni-node1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node1:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node1:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node2:
+    <<: *patroni-common
+    container_name: prb-07-node2
+    hostname: patroni-node2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node2:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node2:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node3:
+    <<: *patroni-common
+    container_name: prb-07-node3
+    hostname: patroni-node3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node3:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node3:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # consul-template: watches Consul catalog, renders and reloads HAProxy config
+  #
+  # Starts before HAProxy and renders the initial haproxy.cfg. HAProxy waits
+  # for this container to be healthy (i.e. haproxy.cfg exists on the volume).
+  #
+  # Uses pid: "service:haproxy" to share HAProxy's PID namespace so that
+  # `kill -HUP <pid>` can signal the HAProxy master process directly.
+  # ===========================================================================
+  consul-template:
+    build:
+      context: ./config
+      dockerfile: Dockerfile.consul-template
+    container_name: prb-07-consul-template
+    user: root
+    command:
+      - "-config=/etc/consul-template/consul-template.hcl"
+    volumes:
+      - ./config/consul-template.hcl:/etc/consul-template/consul-template.hcl:ro
+      - ./config/haproxy.cfg.ctmpl:/etc/consul-template/haproxy.cfg.ctmpl:ro
+      - haproxy_config:/usr/local/etc/haproxy
+      - haproxy_run:/var/run/haproxy
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      patroni-node1:
+        condition: service_started
+      patroni-node2:
+        condition: service_started
+      patroni-node3:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "test", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks:
+      - bench
+
+  # ===========================================================================
+  # HAProxy: master-worker mode; starts only after consul-template has rendered
+  # the initial haproxy.cfg. Reloads on SIGHUP without dropping the listener.
+  # ===========================================================================
+  haproxy:
+    image: haproxy:latest
+    container_name: prb-07-haproxy
+    user: root
+    command:
+      - "haproxy"
+      - "-W"
+      - "-S"
+      - "/var/run/haproxy/master.sock,mode,660"
+      - "-f"
+      - "/usr/local/etc/haproxy/haproxy.cfg"
+    volumes:
+      - haproxy_config:/usr/local/etc/haproxy
+      - haproxy_run:/var/run/haproxy
+    ports:
+      - "5007:5000"
+      - "5008:5001"
+      - "8407:8404"
+    depends_on:
+      consul-template:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Client: Heartbeat Traffic Generator
+  # ===========================================================================
+  client:
+    build:
+      context: ../../../tool/clients/failover
+    container_name: prb-07-client
+    environment:
+      PG_CONNSTRING: "host=haproxy port=5000 dbname=postgres user=postgres password=postgres connect_timeout=5"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "07-consul-template-reload"
+      TEST_RUN_ID: ""  # Set by runner script
+      INTERVAL_MS: "100"
+    depends_on:
+      - haproxy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: Patroni REST API watchers (all 3 nodes in one container)
+  # ===========================================================================
+  observer-patroni:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-07-obs-patroni
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: "patroni-node1:http://patroni-node1:8008,patroni-node2:http://patroni-node2:8008,patroni-node3:http://patroni-node3:8008"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "07-consul-template-reload"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  observer-consul:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-07-obs-consul
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: http://consul-server:8500
+      CONSUL_SCOPE: bench
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "07-consul-template-reload"
+      NODE_NAME: consul-server
+    depends_on:
+      consul-server:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  observer-haproxy:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-07-obs-haproxy
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: haproxy
+      HAPROXY_STATS_URL: "http://haproxy:8404/stats;csv"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "07-consul-template-reload"
+      NODE_NAME: haproxy
+    depends_on:
+      - haproxy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agent: PostgreSQL log watcher (all 3 nodes in one container)
+  # Three pg_logs volumes are mounted at distinct paths so WATCHER_TARGETS
+  # can point each per-node thread at its own log file.
+  # ===========================================================================
+  observer-postgres:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-07-obs-pg
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: "patroni-node1:host=patroni-node1 port=5432 dbname=postgres user=postgres password=postgres,patroni-node2:host=patroni-node2 port=5432 dbname=postgres user=postgres password=postgres,patroni-node3:host=patroni-node3 port=5432 dbname=postgres user=postgres password=postgres"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "07-consul-template-reload"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+volumes:
+  consul_data:
+  haproxy_config:
+  haproxy_run:
+  pg_logs_node1:
+  pg_logs_node2:
+  pg_logs_node3:
+
+networks:
+  bench:
+    name: prb-07-bench
+    ipam:
+      config:
+        - subnet: 172.30.7.0/24
+  dashboard:
+    external: true
+    name: prb-dashboard

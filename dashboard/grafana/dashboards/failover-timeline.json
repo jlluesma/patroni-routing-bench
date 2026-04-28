@@ -1,0 +1,219 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "datasource": { "uid": "prb-timescaledb" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "red",
+        "name": "Failover Milestones",
+        "rawQuery": "SELECT ts AS time, component || ': ' || event_type AS title, old_value || ' → ' || new_value AS text FROM observer_events WHERE $__timeFilter(ts) AND combination_id = '$combination_id' AND event_type IN ('role_change', 'leader_key_change', 'leader_key_deleted', 'timeline_change') ORDER BY ts",
+        "showIn": 0
+      }
+    ]
+  },
+  "description": "End-to-end failover timeline showing all component events and client impact",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Client Query Throughput",
+      "description": "Queries per second bucketed by 1s. Green = successes, Red = failures.",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT time_bucket('1s', ts) AS time, COUNT(*) FILTER (WHERE success) AS \"Successes\", COUNT(*) FILTER (WHERE NOT success) AS \"Failures\" FROM client_events WHERE $__timeFilter(ts) AND combination_id = '$combination_id' GROUP BY 1 ORDER BY 1",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "barAlignment": 0,
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal", "group": "A" }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Successes" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#73BF69" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failures" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#F2495C" } }]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Failed Query Latency",
+      "description": "Latency of failed queries in seconds. Each point is one failed query attempt.",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT ts AS time, latency_us / 1000000.0 AS \"Failure Latency (s)\" FROM client_events WHERE $__timeFilter(ts) AND combination_id = '$combination_id' AND NOT success ORDER BY ts",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "points", "pointSize": 5 },
+          "unit": "s",
+          "color": { "mode": "fixed", "fixedColor": "#F2495C" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Failover Swimlane",
+      "description": "State timeline per component/node. Each lane is a separate column so the state-timeline can forward-fill between sparse state-change events.",
+      "type": "state-timeline",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 14 },
+      "datasource": { "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT ts AS time, CASE WHEN component='consul' THEN CASE WHEN event_type='leader_key_deleted' THEN 'DOWN' ELSE 'UP' END END AS \"Consul\", CASE WHEN component='haproxy' THEN new_value END AS \"HAProxy\", CASE WHEN component='patroni' AND node LIKE '%node1%' THEN CASE new_value WHEN 'primary' THEN 'primary' WHEN 'replica' THEN 'replica' WHEN 'demoted' THEN 'replica' WHEN 'stopped' THEN 'stopped' WHEN 'stopping' THEN 'stopped' WHEN 'unreachable' THEN 'unreachable' WHEN 'running' THEN 'running' WHEN 'creating replica' THEN 'creating replica' ELSE 'starting' END END AS \"Patroni / node1\", CASE WHEN component='patroni' AND node LIKE '%node2%' THEN CASE new_value WHEN 'primary' THEN 'primary' WHEN 'replica' THEN 'replica' WHEN 'demoted' THEN 'replica' WHEN 'stopped' THEN 'stopped' WHEN 'stopping' THEN 'stopped' WHEN 'unreachable' THEN 'unreachable' WHEN 'running' THEN 'running' WHEN 'creating replica' THEN 'creating replica' ELSE 'starting' END END AS \"Patroni / node2\", CASE WHEN component='patroni' AND node LIKE '%node3%' THEN CASE new_value WHEN 'primary' THEN 'primary' WHEN 'replica' THEN 'replica' WHEN 'demoted' THEN 'replica' WHEN 'stopped' THEN 'stopped' WHEN 'stopping' THEN 'stopped' WHEN 'unreachable' THEN 'unreachable' WHEN 'running' THEN 'running' WHEN 'creating replica' THEN 'creating replica' ELSE 'starting' END END AS \"Patroni / node3\", CASE WHEN component='postgres' AND node LIKE '%node1%' THEN CASE new_value WHEN 'ready_accept_connections' THEN 'UP' WHEN 'ready_readonly' THEN 'streaming' ELSE 'starting' END END AS \"Postgres / node1\", CASE WHEN component='postgres' AND node LIKE '%node2%' THEN CASE new_value WHEN 'ready_accept_connections' THEN 'UP' WHEN 'ready_readonly' THEN 'streaming' ELSE 'starting' END END AS \"Postgres / node2\", CASE WHEN component='postgres' AND node LIKE '%node3%' THEN CASE new_value WHEN 'ready_accept_connections' THEN 'UP' WHEN 'ready_readonly' THEN 'streaming' ELSE 'starting' END END AS \"Postgres / node3\" FROM observer_events WHERE $__timeFilter(ts) AND combination_id = '$combination_id' AND event_type NOT IN ('timeline_change') ORDER BY time",
+          "format": "table"
+        }
+      ],
+      "transformations": [],
+      "options": {
+        "showValue": "auto",
+        "mergeValues": true,
+        "alignValue": "left",
+        "rowHeight": 0.8,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "primary": { "color": "green", "index": 0, "text": "primary" },
+                "running": { "color": "green", "index": 1, "text": "running" },
+                "UP": { "color": "green", "index": 2, "text": "UP" },
+                "bound": { "color": "green", "index": 3, "text": "bound" },
+                "replica": { "color": "blue", "index": 4, "text": "replica" },
+                "streaming": { "color": "blue", "index": 5, "text": "streaming" },
+                "stopped": { "color": "red", "index": 6, "text": "stopped" },
+                "DOWN": { "color": "red", "index": 7, "text": "DOWN" },
+                "unreachable": { "color": "red", "index": 8, "text": "unreachable" },
+                "unbound": { "color": "red", "index": 9, "text": "unbound" },
+                "starting": { "color": "yellow", "index": 10, "text": "starting" },
+                "creating replica": { "color": "yellow", "index": 11, "text": "creating replica" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Client Health",
+      "description": "Client success/failure bucketed to 1-second intervals. Green = all queries in that second succeeded. Red = at least one failure.",
+      "type": "state-timeline",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT time_bucket('1s', ts) AS time, CASE WHEN COUNT(*) FILTER (WHERE NOT success) > 0 THEN 'fail' ELSE 'ok' END AS \"client\" FROM client_events WHERE $__timeFilter(ts) AND combination_id = '$combination_id' GROUP BY 1 ORDER BY 1",
+          "format": "table"
+        }
+      ],
+      "transformations": [],
+      "options": {
+        "showValue": "auto",
+        "mergeValues": true,
+        "alignValue": "left",
+        "rowHeight": 0.8,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "ok": { "color": "green", "index": 0, "text": "ok" },
+                "fail": { "color": "red", "index": 1, "text": "fail" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Client Failures Detail",
+      "description": "All failed queries with latency and error messages",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "uid": "prb-timescaledb" },
+      "targets": [
+        {
+          "rawSql": "SELECT ts AS \"Time\", sequence AS \"Seq\", latency_us AS \"Latency (μs)\", error AS \"Error\" FROM client_events WHERE $__timeFilter(ts) AND combination_id = '$combination_id' AND NOT success ORDER BY ts",
+          "format": "table"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["patroni", "failover", "routing", "benchmark"],
+  "templating": {
+    "list": [
+      {
+        "name": "combination_id",
+        "type": "query",
+        "datasource": { "uid": "prb-timescaledb" },
+        "query": "SELECT DISTINCT combination_id FROM observer_events ORDER BY combination_id",
+        "current": { "text": "06-haproxy-rest-polling", "value": "06-haproxy-rest-polling" },
+        "refresh": 2
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Failover Timeline",
+  "uid": "prb-failover-timeline",
+  "version": 3
+}

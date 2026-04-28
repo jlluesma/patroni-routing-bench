@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["consul-exporter:9107"],
+    "labels": {
+      "combination": "06-haproxy-rest-polling",
+      "env": "bench"
+    }
+  }
+]

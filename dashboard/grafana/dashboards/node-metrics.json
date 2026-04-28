@@ -1,0 +1,90 @@
+{
+  "description": "System-level metrics (CPU, memory, disk, network) across all components during failover tests",
+  "editable": true,
+  "panels": [
+    {
+      "title": "CPU Usage by Node",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\", job=\"node\"}[$__rate_interval])) * 100)",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 } }
+    },
+    {
+      "title": "Memory Usage by Node",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node\"} / node_memory_MemTotal_bytes{job=\"node\"})) * 100",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 } }
+    },
+    {
+      "title": "Network Received (bytes/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "rate(node_network_receive_bytes_total{job=\"node\", device!=\"lo\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "title": "Network Transmitted (bytes/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "rate(node_network_transmit_bytes_total{job=\"node\", device!=\"lo\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "title": "Disk I/O Read (bytes/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "rate(node_disk_read_bytes_total{job=\"node\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "title": "Disk I/O Write (bytes/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prb-prometheus" },
+      "targets": [
+        {
+          "expr": "rate(node_disk_written_bytes_total{job=\"node\"}[$__rate_interval])",
+          "legendFormat": "{{instance}} {{device}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["patroni", "node", "infrastructure"],
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "Node Metrics",
+  "uid": "prb-node-metrics",
+  "version": 1
+}

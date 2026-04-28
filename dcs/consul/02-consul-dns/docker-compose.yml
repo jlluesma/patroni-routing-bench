@@ -1,0 +1,243 @@
+###############################################################################
+# patroni-routing-bench: Combination 02 — Consul DNS Routing
+#
+# Architecture:
+#   3x Patroni/PostgreSQL nodes (1 primary + 2 replicas)
+#   1x Consul server (DCS + DNS resolver on port 53)
+#   1x Client (connects via Consul DNS: primary.bench.service.consul)
+#   3x Observer agents (patroni ×1, pg ×1, consul ×1)
+#
+# Routing mechanism: Consul DNS
+#   - Consul runs its DNS interface on port 53 (requires NET_BIND_SERVICE)
+#   - The client container uses consul-server as its DNS resolver
+#   - primary.bench.service.consul resolves to whichever node is passing
+#     the /primary health check (the current Patroni leader)
+#   - service_ttl=0s means clients never cache the DNS response
+#
+# Health check flow:
+#   consul-service.json registers each node with a check against /primary
+#   After failover, once the new primary passes its check (~5s interval),
+#   Consul DNS starts returning the new IP.
+#
+# The dashboard stack (TimescaleDB + Prometheus + Grafana) runs separately.
+# Start it first: cd ../../../dashboard && docker compose up -d
+#
+# Usage:
+#   docker compose up -d                     # default observer poll = 100ms
+#   POLL_INTERVAL_MS=50 docker compose up -d # finer resolution
+#
+# Observer poll interval: adjust POLL_INTERVAL_MS to change
+# measurement precision. Tested values: 50ms, 100ms, 200ms
+#
+# Ports:
+#   Consul UI: localhost:8502  (offset to allow parallel runs with 01/06)
+###############################################################################
+
+x-patroni-common: &patroni-common
+  build:
+    context: ../../../shared/docker/postgres-patroni
+  environment: &patroni-env
+    CONSUL_HOST: consul-server
+    CONSUL_PORT: "8500"
+    PATRONI_CONFIG: /etc/patroni/patroni.yml
+  volumes:
+    - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+  depends_on:
+    consul-server:
+      condition: service_healthy
+
+x-observer-common: &observer-common
+  build:
+    context: ../../../tool/observers
+  environment: &observer-env
+    POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-100}"
+
+services:
+
+  # ===========================================================================
+  # DCS: Consul Server (also serves DNS on port 53)
+  # ===========================================================================
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: prb-02-consul
+    command: agent -server -config-dir=/consul/config -bind='{{ GetInterfaceIP "eth0" }}'
+    volumes:
+      - ./config/consul.json:/consul/config/consul.json:ro
+      - consul_data:/consul/data
+    ports:
+      - "8502:8500"
+    cap_add:
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      bench:
+        ipv4_address: 172.30.2.10
+      dashboard:
+
+  # ===========================================================================
+  # Patroni/PostgreSQL Nodes
+  # ===========================================================================
+  patroni-node1:
+    <<: *patroni-common
+    container_name: prb-02-node1
+    hostname: patroni-node1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: "172.30.2.11:8008"
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: "172.30.2.11:5432"
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node1:/var/log/postgresql
+    networks:
+      bench:
+        ipv4_address: 172.30.2.11
+      dashboard:
+
+  patroni-node2:
+    <<: *patroni-common
+    container_name: prb-02-node2
+    hostname: patroni-node2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: "172.30.2.12:8008"
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: "172.30.2.12:5432"
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node2:/var/log/postgresql
+    networks:
+      bench:
+        ipv4_address: 172.30.2.12
+      dashboard:
+
+  patroni-node3:
+    <<: *patroni-common
+    container_name: prb-02-node3
+    hostname: patroni-node3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: "172.30.2.13:8008"
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: "172.30.2.13:5432"
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - pg_logs_node3:/var/log/postgresql
+    networks:
+      bench:
+        ipv4_address: 172.30.2.13
+      dashboard:
+
+  # ===========================================================================
+  # Client: Heartbeat Traffic Generator (Consul DNS routing)
+  # ===========================================================================
+  client:
+    build:
+      context: ../../../tool/clients/failover
+    container_name: prb-02-client
+    environment:
+      PG_CONNSTRING: "host=primary.bench.service.consul port=5432 dbname=postgres user=postgres password=postgres connect_timeout=5"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "02-consul-dns"
+      TEST_RUN_ID: ""  # Set by runner script
+      INTERVAL_MS: "100"
+    # Use consul-server as DNS resolver so primary.bench.service.consul resolves
+    dns:
+      - 172.30.2.10
+    dns_search:
+      - service.consul
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      patroni-node1:
+        condition: service_started
+      patroni-node2:
+        condition: service_started
+      patroni-node3:
+        condition: service_started
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: Patroni REST API watchers (all 3 nodes in one container)
+  # ===========================================================================
+  observer-patroni:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-02-obs-patroni
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: "patroni-node1:http://patroni-node1:8008,patroni-node2:http://patroni-node2:8008,patroni-node3:http://patroni-node3:8008"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "02-consul-dns"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  observer-consul:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-02-obs-consul
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: http://consul-server:8500
+      CONSUL_SCOPE: bench
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "02-consul-dns"
+      NODE_NAME: consul-server
+    depends_on:
+      consul-server:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agent: PostgreSQL log watcher (all 3 nodes in one container)
+  # Three pg_logs volumes are mounted at distinct paths so WATCHER_TARGETS
+  # can point each per-node thread at its own log file.
+  # ===========================================================================
+  observer-postgres:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-02-obs-pg
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: "patroni-node1:host=patroni-node1 port=5432 dbname=postgres user=postgres password=postgres,patroni-node2:host=patroni-node2 port=5432 dbname=postgres user=postgres password=postgres,patroni-node3:host=patroni-node3 port=5432 dbname=postgres user=postgres password=postgres"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "02-consul-dns"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+volumes:
+  consul_data:
+  pg_logs_node1:
+  pg_logs_node2:
+  pg_logs_node3:
+
+networks:
+  bench:
+    name: prb-02-bench
+    ipam:
+      config:
+        - subnet: 172.30.2.0/24
+  dashboard:
+    external: true
+    name: prb-dashboard

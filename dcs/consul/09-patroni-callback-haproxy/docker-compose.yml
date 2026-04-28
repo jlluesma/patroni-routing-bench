@@ -1,0 +1,283 @@
+###############################################################################
+# patroni-routing-bench: Combination 09 — Patroni Callback → HAProxy Runtime API
+#
+# Architecture:
+#   3x Patroni/PostgreSQL nodes (1 primary + 2 replicas)
+#   1x Consul server (DCS only)
+#   1x HAProxy (static config, Runtime API on TCP port 9999)
+#   1x Client (heartbeat via HAProxy port 5000)
+#   4x Observer agents (patroni ×1, pg ×1, consul ×1, haproxy ×1)
+#
+# Routing mechanism: Patroni on_role_change callback → HAProxy Runtime API
+#   - No consul-template, no vip-manager, no polling loop of any kind.
+#   - Patroni calls haproxy_callback.sh synchronously at every role change.
+#   - The callback opens a TCP connection to haproxy:9999 (HAProxy's TCP
+#     stats socket) and sends a Runtime API command:
+#       set server primary_backend/<node> state ready   (on promotion)
+#       set server primary_backend/<node> state maint   (on demotion)
+#   - The callback uses Python 3's socket module (available in the patroni
+#     image) because curl cannot speak the HAProxy Runtime API wire protocol.
+#   - HAProxy's own httpchk GET /primary health checks still run on servers
+#     in "ready" state as a secondary validation layer.
+#
+# Key difference vs combo 08 (consul-template Runtime API):
+#   Combo 08: consul-template polls Consul → renders script → socat on socket
+#   Combo 09: Patroni fires callback synchronously on promotion — zero lag
+#             between promotion and the HAProxy state change
+#
+# Key difference vs combo 04 (vip-manager callback):
+#   Combo 04: callback manages a VIP address on a network interface
+#   Combo 09: callback manages HAProxy backend server state — no IP changes,
+#             no ARP, pure routing table update inside the proxy process
+#
+# Prerequisites:
+#   chmod +x config/haproxy_callback.sh
+#
+# The dashboard stack (TimescaleDB + Prometheus + Grafana) runs separately.
+# Start it first: cd ../../../dashboard && docker compose up -d
+#
+# Usage:
+#   docker compose up -d                     # default observer poll = 100ms
+#   POLL_INTERVAL_MS=50 docker compose up -d # finer resolution
+#
+# Ports:
+#   HAProxy primary:  localhost:5090
+#   HAProxy replicas: localhost:5091
+#   HAProxy stats:    localhost:8409/stats
+#   Consul UI:        localhost:8509
+###############################################################################
+
+x-patroni-common: &patroni-common
+  build:
+    context: ../../../shared/docker/postgres-patroni
+  environment: &patroni-env
+    CONSUL_HOST: consul-server
+    CONSUL_PORT: "8500"
+    PATRONI_CONFIG: /etc/patroni/patroni.yml
+  depends_on:
+    consul-server:
+      condition: service_healthy
+
+x-observer-common: &observer-common
+  build:
+    context: ../../../tool/observers
+  environment: &observer-env
+    POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-100}"
+
+services:
+
+  # ===========================================================================
+  # DCS: Consul Server
+  # ===========================================================================
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: prb-09-consul
+    command: agent -server -config-file=/consul/config/consul.json -bind='{{ GetInterfaceIP "eth0" }}'
+    volumes:
+      - ./config/consul.json:/consul/config/consul.json:ro
+      - consul_data:/consul/data
+    ports:
+      - "8509:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # HAProxy: static config, Runtime API on TCP port 9999 (bench-internal only)
+  # Port 9999 is NOT in the ports: list — accessible only on prb-09-bench.
+  # ===========================================================================
+  haproxy:
+    image: haproxy:latest
+    container_name: prb-09-haproxy
+    user: root
+    volumes:
+      - ./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - haproxy_run:/var/run/haproxy
+    ports:
+      - "5090:5000"
+      - "5091:5001"
+      - "8409:8404"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Patroni/PostgreSQL Nodes
+  # haproxy_callback.sh is mounted at /usr/local/bin and must be executable:
+  #   chmod +x config/haproxy_callback.sh
+  # ===========================================================================
+  patroni-node1:
+    <<: *patroni-common
+    container_name: prb-09-node1
+    hostname: patroni-node1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node1:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./config/haproxy_callback.sh:/usr/local/bin/haproxy_callback.sh:ro
+      - pg_logs_node1:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node2:
+    <<: *patroni-common
+    container_name: prb-09-node2
+    hostname: patroni-node2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node2:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./config/haproxy_callback.sh:/usr/local/bin/haproxy_callback.sh:ro
+      - pg_logs_node2:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  patroni-node3:
+    <<: *patroni-common
+    container_name: prb-09-node3
+    hostname: patroni-node3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: patroni-node3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni-node3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni-node3:5432
+    volumes:
+      - ./config/patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./config/haproxy_callback.sh:/usr/local/bin/haproxy_callback.sh:ro
+      - pg_logs_node3:/var/log/postgresql
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Client: Heartbeat Traffic Generator
+  # ===========================================================================
+  client:
+    build:
+      context: ../../../tool/clients/failover
+    container_name: prb-09-client
+    environment:
+      PG_CONNSTRING: "host=haproxy port=5000 dbname=postgres user=postgres password=postgres connect_timeout=5"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "09-patroni-callback-haproxy"
+      TEST_RUN_ID: ""  # Set by runner script
+      INTERVAL_MS: "100"
+    depends_on:
+      - haproxy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agents: Patroni REST API watchers (all 3 nodes in one container)
+  # ===========================================================================
+  observer-patroni:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-09-obs-patroni
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: patroni
+      WATCHER_TARGETS: "patroni-node1:http://patroni-node1:8008,patroni-node2:http://patroni-node2:8008,patroni-node3:http://patroni-node3:8008"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "09-patroni-callback-haproxy"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+  observer-consul:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-09-obs-consul
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: consul
+      CONSUL_URL: http://consul-server:8500
+      CONSUL_SCOPE: bench
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "09-patroni-callback-haproxy"
+      NODE_NAME: consul-server
+    depends_on:
+      consul-server:
+        condition: service_healthy
+    networks:
+      - bench
+      - dashboard
+
+  observer-haproxy:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-09-obs-haproxy
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: haproxy
+      HAPROXY_STATS_URL: "http://haproxy:8404/stats;csv"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "09-patroni-callback-haproxy"
+      NODE_NAME: haproxy
+    depends_on:
+      - haproxy
+    networks:
+      - bench
+      - dashboard
+
+  # ===========================================================================
+  # Observer Agent: PostgreSQL log watcher (all 3 nodes in one container)
+  # Three pg_logs volumes are mounted at distinct paths so WATCHER_TARGETS
+  # can point each per-node thread at its own log file.
+  # ===========================================================================
+  observer-postgres:
+    build:
+      context: ../../../tool/observers
+    container_name: prb-09-obs-pg
+    environment:
+      <<: *observer-env
+      OBSERVER_COMPONENT: postgres
+      WATCHER_TARGETS: "patroni-node1:host=patroni-node1 port=5432 dbname=postgres user=postgres password=postgres,patroni-node2:host=patroni-node2 port=5432 dbname=postgres user=postgres password=postgres,patroni-node3:host=patroni-node3 port=5432 dbname=postgres user=postgres password=postgres"
+      TIMESCALE_CONNSTRING: "host=prb-timescaledb port=5432 dbname=bench user=bench password=bench"
+      COMBINATION_ID: "09-patroni-callback-haproxy"
+    depends_on:
+      - patroni-node1
+      - patroni-node2
+      - patroni-node3
+    networks:
+      - bench
+      - dashboard
+
+volumes:
+  consul_data:
+  haproxy_run:
+  pg_logs_node1:
+  pg_logs_node2:
+  pg_logs_node3:
+
+networks:
+  bench:
+    name: prb-09-bench
+    ipam:
+      config:
+        - subnet: 172.30.9.0/24
+  dashboard:
+    external: true
+    name: prb-dashboard

@@ -1,0 +1,33 @@
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    uid: prb-timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    database: bench
+    user: bench
+    isDefault: true
+    jsonData:
+      database: bench
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 5
+      connMaxLifetime: 14400
+      postgresVersion: 1700
+      timescaledb: true
+    secureJsonData:
+      password: bench
+    editable: false
+
+  - name: Prometheus
+    uid: prb-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 2s
+    editable: false
