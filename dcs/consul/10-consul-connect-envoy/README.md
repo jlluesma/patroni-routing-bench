@@ -1,3 +1,10 @@
+> **Status: Parked.** This combination is not implemented. It is
+> included as an architecture reference for potential future work.
+> Do not attempt to run it — the Docker images and configs are
+> incomplete.
+
+---
+
 # Combination 10 — Consul Connect + Envoy *(parked)*
 
 > **Status: parked.** This combination is defined but not yet implemented. It is excluded from all batch runs by default.

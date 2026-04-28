@@ -183,7 +183,12 @@ To reproduce our results or add new routing combinations:
 ```bash
 git clone https://github.com/jlluesma/patroni-routing-bench.git
 cd patroni-routing-bench
+
+# Start dashboard (core: TimescaleDB + Grafana)
 cd dashboard && docker compose up -d
+
+# Optional: start Prometheus for infrastructure metrics
+# cd dashboard && docker compose --profile metrics up -d
 ```
 
 ### 2. Run a single combination
@@ -232,7 +237,7 @@ Lightweight Python daemons that watch each infrastructure component and emit tim
 | `patroni` | REST API `/patroni` on all 3 nodes | `role_change`, `node_state_change` |
 | `consul` | KV leader key (blocking queries) | `leader_key_deleted`, `leader_key_created` |
 | `haproxy` | Stats CSV endpoint | `backend_state_change` (UP/DOWN) |
-| `postgres` | PostgreSQL log file (tailed) | `pg_promote_requested`, `pg_ready_accept_connections` |
+| `postgres` | Direct SQL on each node (`pg_is_in_recovery()`) | `pg_promote_detected`, `pg_connection_lost`, `pg_ready_accept_connections` |
 | `vip` | Network interface (`ip addr show`) | `vip_state_change` (bound/unbound) |
 
 Observers use **multi-target mode**: one container watches all nodes of a component type simultaneously via the `WATCHER_TARGETS` environment variable.
@@ -359,7 +364,7 @@ Access at http://localhost:3000 (admin/admin) when running the benchmark lab.
 
 ### The PgBouncer Factor
 
-The current benchmark tests routing layers in isolation: one client, direct connections, no connection pooling. In production, **PgBouncer sits between the application and the routing layer**, and this changes the dynamics fundamentally:
+The current benchmark tests routing layers in isolation: one client, direct connections, no connection pooling. In production, **PgBouncer is commonly deployed at different points in the stack** — on the application side (App → PgBouncer → HAProxy → PostgreSQL), colocated with the database (App → HAProxy → PgBouncer → PostgreSQL), or as standalone pooler (App → PgBouncer → PostgreSQL). Each placement changes failover dynamics differently:
 
 - **Connection establishment time** — how fast does PgBouncer re-establish its backend pool after a failover through each routing layer?
 - **Steady-state latency overhead** — Client → PgBouncer → HAProxy → PostgreSQL is three hops. Client → PgBouncer → VIP → PostgreSQL is two. What's the per-hop cost?

@@ -1,7 +1,7 @@
 apiVersion: 1
 
 providers:
-  - name: patroni-routing-bench
+  - name: failover-analysis
     orgId: 1
     type: file
     disableDeletion: false
@@ -9,5 +9,16 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: true
     options:
-      path: /var/lib/grafana/dashboards
-      foldersFromFilesStructure: false
+      path: /var/lib/grafana/dashboards/failover-analysis
+      foldersFromFilesStructure: true
+
+  - name: infrastructure-metrics
+    orgId: 1
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/infrastructure-metrics
+      foldersFromFilesStructure: true

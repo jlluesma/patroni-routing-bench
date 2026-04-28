@@ -57,6 +57,8 @@ services:
       - ./prometheus/targets:/etc/prometheus/targets:ro
       - prometheus_data:/prometheus
     restart: unless-stopped
+    profiles:
+      - metrics
     networks:
       - dashboard
 
@@ -73,13 +75,12 @@ services:
       - "3000:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/dashboards/failover-analysis:/var/lib/grafana/dashboards/failover-analysis:ro
+      - ./grafana/dashboards/infrastructure-metrics:/var/lib/grafana/dashboards/infrastructure-metrics:ro
       - grafana_data:/var/lib/grafana
     depends_on:
       timescaledb:
         condition: service_healthy
-      prometheus:
-        condition: service_started
     restart: unless-stopped
     networks:
       - dashboard
