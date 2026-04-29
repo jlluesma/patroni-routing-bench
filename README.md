@@ -80,15 +80,15 @@ Median client-perceived downtime (seconds):
 
 | Combination | Category | hard_stop | hard_kill | switchover |
 |---|---|---|---|---|
-| 01 — libpq multi-host | Client | 1.3s | 25.5s | 1.2s |
-| 03 — vip-manager (poll) | VIP | 1.9s | 23.0s | 1.6s |
-| 02 — Consul DNS | DNS | 3.9s | 24.0s | 4.5s |
-| 07 — consul-template reload | HAProxy | 5.2s | 27.4s | 5.0s |
-| 04 — VIP Patroni callback | VIP | 9.7s | 26.0s | 4.1s |
-| 06t — HAProxy REST poll (tuned) | HAProxy | 9.1s | 20.7s | 6.6s |
-| 09 — Patroni callback → HAProxy | HAProxy | 9.1s | 28.9s | 6.7s |
-| 08 — consul-template runtime API | HAProxy | 9.2s | 29.9s | 4.0s |
-| 06 — HAProxy REST poll | HAProxy | 9.4s | 25.1s | 5.3s |
+| 01 — libpq multi-host | Client | 1.3s | 22.2s | 1.3s |
+| 03 — vip-manager (poll) | VIP | 1.4s | 26.4s | 1.1s |
+| 07 — consul-template reload | HAProxy | 5.2s | 25.7s | 4.7s |
+| 02 — Consul DNS | DNS | 6.6s | 29.1s | 2.1s |
+| 04 — VIP Patroni callback | VIP | 6.8s | 26.1s | 4.3s |
+| 06 — HAProxy REST poll | HAProxy | 9.1s | 29.5s | 6.4s |
+| 06t — HAProxy REST poll (tuned) | HAProxy | 9.1s | 21.5s | 6.4s |
+| 08 — consul-template runtime API | HAProxy | 9.1s | 30.3s | 4.0s |
+| 09 — Patroni callback → HAProxy | HAProxy | 10.9s | 26.0s | 6.0s |
 
 > **Note:** Results are from a Docker Desktop / WSL2 environment. VIP combinations include Docker-specific ARP cache overhead not present in bare-metal deployments. Use the tool on your own infrastructure for production-representative numbers.
 
@@ -104,7 +104,7 @@ Median client-perceived downtime (seconds):
 
 The tool doesn't just measure total downtime — it captures timestamped events at every layer, showing exactly where time is spent during a failover.
 
-**HAProxy REST polling (combo 06) — hard_stop, 9.4s total:**
+**HAProxy REST polling (combo 06) — hard_stop, 9.1s total:**
 
 ![Failover Timeline — HAProxy](docs/images/gantt_haproxy_hard_stop.png)
 
@@ -131,13 +131,13 @@ During a `hard_stop` failover with HAProxy REST polling:
 | Phase | Typical Duration | What Happens |
 |---|---|---|
 | DCS detection | ~1s | Consul blocking query detects leader key change |
-| PostgreSQL promotion | ~0.2–1.3s | New primary accepts connections |
-| Routing detection | ~2–6s | HAProxy health checks detect the new primary (`inter 2s × fall 3`) |
-| Client recovery | ~1–4s | Application reconnects through the routing layer |
-| **Total downtime** | **~9–12s** | End-to-end client-perceived outage |
+| PostgreSQL promotion | ~2.7s | New primary accepts connections (PG ready: 3.7s after failure) |
+| Routing detection | ~5.4s | HAProxy health checks detect the new primary (`inter 2s × fall 3`) |
+| Client recovery | ~0s | Client reconnects immediately once HAProxy switches |
+| **Total downtime** | **~9.1s** | End-to-end client-perceived outage |
 
 ```
-Critical path: DCS detection (1.0s) → PG promotion (1.3s) → Routing detection (6.0s) → Client recovery (1.0s)
+Critical path: DCS detection (1.0s) → PG promotion (2.7s) → Routing detection (5.4s) → Client recovery (~0s) = 9.1s total
 Dominant factor: Routing layer (HAProxy health check polling)
 Optimization target: Reduce inter/fall values, or switch to event-driven routing (combos 07-09)
 ```

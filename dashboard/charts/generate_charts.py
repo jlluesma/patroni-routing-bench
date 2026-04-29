@@ -251,6 +251,11 @@ def extract_milestones(obs_df: pd.DataFrame, cli_df: pd.DataFrame) -> dict:
             ha_up = ha_up[ha_up["ts"] >= ms["first_client_failure"]]
         if not ha_up.empty:
             ms["haproxy_up"] = ha_up["ts"].iloc[0]
+    pg_promo = obs_df[
+        obs_df["event_type"].isin(["pg_promote_detected", "pg_promote_requested"])
+    ]
+    if not pg_promo.empty:
+        ms["pg_promoted"] = pg_promo["ts"].iloc[-1]
     return ms
 
 def extract_overlap_phases(obs_df: pd.DataFrame, cli_df: pd.DataFrame):
@@ -517,12 +522,31 @@ def build_phase_chart(milestones: dict, combination_id: str, title: str, subtitl
         return None
 
     phases = {}
-    for name, a, b in [
-        ("DCS Detection",     "first_client_failure",  "consul_leader_deleted"),
-        ("Patroni Promotion", "consul_leader_deleted",  "patroni_promoted"),
-        ("Routing Detection", "patroni_promoted",       "haproxy_up"),
-        ("Client Recovery",   "haproxy_up",             "first_recovery"),
-    ]:
+    # Build adaptive phase chain based on available milestones
+    # Order: failure → DCS → PG promotion → Patroni detection → routing → recovery
+    available = []
+    available.append(("first_client_failure", "Failure"))
+
+    if "consul_leader_deleted" in milestones:
+        available.append(("consul_leader_deleted", "DCS Detection"))
+    if "pg_promoted" in milestones:
+        available.append(("pg_promoted", "PG Promotion"))
+    elif "patroni_promoted" in milestones:
+        available.append(("patroni_promoted", "Patroni Promotion"))
+    if "haproxy_up" in milestones:
+        available.append(("haproxy_up", "Routing Detection"))
+    if "first_recovery" in milestones:
+        available.append(("first_recovery", "Client Recovery"))
+
+    # Build phases from consecutive available milestones
+    phase_list = []
+    for i in range(len(available) - 1):
+        key_a = available[i][0]
+        key_b = available[i + 1][0]
+        label = available[i + 1][1]
+        phase_list.append((label, key_a, key_b))
+
+    for name, a, b in phase_list:
         d = _dur(a, b)
         if d is not None: phases[name] = d
     if not phases: return None, {}
@@ -532,7 +556,7 @@ def build_phase_chart(milestones: dict, combination_id: str, title: str, subtitl
 
     fig = go.Figure()
     cumulative = 0.0
-    phase_order = ["DCS Detection", "Patroni Promotion", "Routing Detection", "Client Recovery"]
+    phase_order = ["DCS Detection", "PG Promotion", "Patroni Promotion", "Routing Detection", "Client Recovery"]
     for name in phase_order:
         dur = phases.get(name)
         if dur is None: continue
@@ -1311,11 +1335,18 @@ def _render_batch_waterfall(waterfall_data: dict) -> str:
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
+        t1 = medians.get("T1")
+        t2 = medians.get("T2")
+        t3 = medians.get("T3")
         trows = ""
+        if t2 is not None:
+            trows += f"<tr><td>DCS detected</td><td>{t2:.1f}s</td></tr>"
         if t0 is not None:
-            trows += f"<tr><td>DCS detection</td><td>{t0:.1f}s</td></tr>"
-        if t4 is not None:
-            trows += f"<tr><td>PG ready</td><td>{t4:.1f}s</td></tr>"
+            trows += f"<tr><td>PG promoted</td><td>{t0:.1f}s</td></tr>"
+        if t1 is not None:
+            trows += f"<tr><td>Patroni promoted</td><td>{t1:.1f}s</td></tr>"
+        if t3 is not None:
+            trows += f"<tr><td>Routing updated</td><td>{t3:.1f}s</td></tr>"
         trows += f"<tr><td><strong>Client recovered</strong></td><td><strong>{tc:.1f}s</strong></td></tr>"
         html += (f"<h3>{_h(label)}</h3>" + _plotly_html(fig)
                  + f"<table><thead><tr><th>Milestone</th><th>Offset from first failure</th></tr></thead>"
