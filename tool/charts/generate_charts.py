@@ -36,6 +36,7 @@ STATE_COLORS = {
 }
 PHASE_COLORS = {
     "DCS Detection":     "#e67e22",
+    "PG Promotion":      "#e74c3c",
     "Patroni Promotion": "#f39c12",
     "Routing Detection": "#3498db",
     "Client Recovery":   "#2ecc71",
@@ -1306,15 +1307,34 @@ def _render_batch_waterfall(waterfall_data: dict) -> str:
         label = LAYER_LABELS.get(combo_id, combo_id)
         tc = medians.get("Tc")
         t0 = medians.get("T0")
+        t1 = medians.get("T1")
+        t2 = medians.get("T2")
+        t3 = medians.get("T3")
         t4 = medians.get("T4")
         if tc is None:
             continue
+        chain = [("Failure", 0.0)]
+        if t2 is not None:
+            chain.append(("DCS Detection", t2))
+        if t0 is not None:
+            chain.append(("PG Promotion", t0))
+        elif t4 is not None:
+            chain.append(("PG Promotion", t4))
+        if t1 is not None and t0 is None:
+            chain.append(("Patroni Promotion", t1))
+        if t3 is not None:
+            chain.append(("Routing Detection", t3))
+        chain.append(("Client Recovery", tc))
+        chain.sort(key=lambda x: x[1])
         phases = []
-        if t4 is not None and t0 is not None:
-            phases.append(("DCS + Election", t4, "#e67e22"))
-            phases.append(("Routing update", max(0, tc - t4), "#3498db"))
-        else:
-            phases.append(("Total failover", tc, "#e67e22"))
+        for i in range(len(chain) - 1):
+            name = chain[i + 1][0]
+            duration = chain[i + 1][1] - chain[i][1]
+            if duration > 0:
+                color = PHASE_COLORS.get(name, GRAY)
+                phases.append((name, duration, color))
+        if not phases:
+            phases = [("Total failover", tc, "#e67e22")]
 
         fig = go.Figure()
         cumulative = 0
@@ -1335,9 +1355,6 @@ def _render_batch_waterfall(waterfall_data: dict) -> str:
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        t1 = medians.get("T1")
-        t2 = medians.get("T2")
-        t3 = medians.get("T3")
         trows = ""
         if t2 is not None:
             trows += f"<tr><td>DCS detected</td><td>{t2:.1f}s</td></tr>"

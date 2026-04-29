@@ -141,6 +141,8 @@ docker exec prb-tsdb psql -U bench -c "
 SELECT * FROM client_latency_buckets;"
 ```
 
+> **Note:** These examples use `prb-tsdb` (the container name in `tool/docker-compose.yml`). If you're running the benchmark lab with `dashboard/docker-compose.yml`, the container is called `prb-timescaledb` instead.
+
 ## Using with HAProxy
 
 If your routing layer is HAProxy, add the HAProxy observer:

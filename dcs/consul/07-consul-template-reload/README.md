@@ -105,7 +105,6 @@ config/
 ├── consul.json                Consul server config
 ├── consul-template.hcl        consul-template config (template path, command)
 ├── haproxy.cfg.ctmpl          Jinja-like template for haproxy.cfg
-├── haproxy-initial.cfg        Static bootstrap config (used before first render)
 └── Dockerfile.consul-template Builds consul-template image with socat added
 ```
 
