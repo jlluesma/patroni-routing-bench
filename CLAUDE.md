@@ -155,3 +155,21 @@ Key views:
 - `failover_window`: client-perceived downtime per test run
 - `component_timing`: per-component detection timing
 - `failover_timeline`: merged server + client event stream
+
+## Recent Changes (Session 5 — April 29, 2026)
+
+### Batch Report Enhancements (`dashboard/charts/generate_charts.py`)
+- **Waterfall phase charts fixed**: adaptive multi-phase chain replaces rigid 2-phase logic. Phases now built from whatever milestones are available (DCS Detection → PG Promotion → Routing Detection → Client Recovery), skipping missing ones.
+- **Server/Client split annotation**: each waterfall combo shows "Server: X.Xs | Client routing delay: Y.Ys (Z%)" below the chart. T4 (pg_ready) excluded from server_done calculation. Negative delays show "Client recovered before server events completed" message.
+- **Per-iteration detail table (Section 7)**: one table per combination with milestone offsets from TimescaleDB. Iteration-to-run matching fixed (global iteration counter → per-scenario counter).
+- **Negative client delay clamped to 0.0s** in per-iteration tables.
+- **Summary table cleaned**: removed min/max/spread columns (meaningless across mixed scenarios).
+- **`SCENARIO_ORDER`** updated to include `network_partition`.
+
+### Documentation Fixes
+- `tool/README.md`: added note about container name difference (`prb-tsdb` vs `prb-timescaledb`).
+- `dcs/consul/07-consul-template-reload/README.md`: removed reference to non-existent `haproxy-initial.cfg`.
+- Per-combo reports now use `LAYER_LABELS` for friendly names in `<h1>` and `<title>`.
+
+### Batch Run
+- 5-iteration batch (135 iterations) launched for stable medians and variance analysis.

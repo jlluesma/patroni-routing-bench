@@ -901,7 +901,7 @@ def _render_header(combination_id, session_date, patroni_cfg, runs_df, iteration
     ended_r = runs_df["ended_at"].dropna().max() if not runs_df.empty else None
     ended   = ended_r.strftime("%Y-%m-%d %H:%M:%S UTC") if ended_r is not None and not pd.isna(ended_r) else "—"
     return f"""\
-<h1>Failover Report — {_h(combination_id)}</h1>
+<h1>Failover Report — {_h(LAYER_LABELS.get(combination_id, combination_id))}</h1>
 <div class="meta"><div class="meta-grid">
   <span class="meta-label">Combination</span>   <span><code>{_h(combination_id)}</code></span>
   <span class="meta-label">Session date</span>  <span>{_h(str(session_date))}</span>
@@ -1178,10 +1178,17 @@ SELECT run_id,
 FROM milestones ORDER BY run_id
 """
 
-def _compute_waterfall(conn, combination_id: str) -> Optional[dict]:
+def _compute_waterfall(conn, combination_id: str, scenario: str = None) -> Optional[dict]:
     try:
         with conn.cursor() as cur:
-            cur.execute(_WATERFALL_SQL, [combination_id])
+            if scenario:
+                sql = _WATERFALL_SQL.replace(
+                    "WHERE tr.combination_id = %s",
+                    "WHERE tr.combination_id = %s AND tr.failover_type = %s",
+                )
+                cur.execute(sql, [combination_id, scenario])
+            else:
+                cur.execute(_WATERFALL_SQL, [combination_id])
             rows = cur.fetchall()
     except Exception as e:
         print(f"  [WARN] Waterfall query failed for {combination_id}: {e}", file=sys.stderr)
@@ -1299,6 +1306,97 @@ def _render_batch_family_charts(df: pd.DataFrame) -> str:
         html += "<h3>Overall Leaderboard</h3>" + _hbar("Overall leaderboard — all combinations", success, df)
     return html
 
+def _render_hero_chart(df: pd.DataFrame, conn) -> str:
+    """Stacked bar: server time vs client routing delay for hard_stop, all combos."""
+    points = []
+    for combo_id in sorted(df["combo_dir"].unique()):
+        medians = _compute_waterfall(conn, combo_id, "hard_stop")
+        if not medians:
+            continue
+        tc = medians.get("Tc")
+        if tc is None:
+            continue
+        t0 = medians.get("T0"); t1 = medians.get("T1")
+        t2 = medians.get("T2"); t3 = medians.get("T3")
+        server_vals = [v for v in [t0, t1, t2, t3] if v is not None]
+        server_done = max(server_vals) if server_vals else 0.0
+        client_delay = tc - server_done
+        if client_delay < 0:
+            server_done  = tc
+            client_delay = 0.0
+        points.append({
+            "combo_id":    combo_id,
+            "label":       LAYER_LABELS.get(combo_id, combo_id),
+            "server_done": server_done,
+            "client_delay": client_delay,
+            "tc":          tc,
+        })
+
+    if not points:
+        return "<p><em>No hard_stop data available for hero chart.</em></p>"
+
+    points.sort(key=lambda p: p["tc"])
+    labels       = [p["label"]        for p in points]
+    server_times = [p["server_done"]  for p in points]
+    client_times = [p["client_delay"] for p in points]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Server (DCS + election + promotion)",
+        y=labels, x=server_times, orientation="h",
+        marker_color="#e67e22",
+        text=[f"{v:.1f}s" for v in server_times],
+        textposition="inside", insidetextanchor="middle",
+        hovertemplate="%{y}: server %{x:.2f}s<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Client routing delay",
+        y=labels, x=client_times, orientation="h",
+        marker_color="#3498db",
+        text=[f"{v:.1f}s" if v > 0 else "—" for v in client_times],
+        textposition="inside", insidetextanchor="middle",
+        hovertemplate="%{y}: client delay %{x:.2f}s<extra></extra>",
+    ))
+    # Total annotation at the right end of each bar
+    for p, label in zip(points, labels):
+        fig.add_annotation(
+            x=p["tc"], y=label,
+            text=f"<b>{p['tc']:.1f}s</b>",
+            xanchor="left", yanchor="middle",
+            showarrow=False,
+            font=dict(size=12, color=DARK, family=FONT_FAMILY),
+            xshift=6,
+        )
+
+    height = max(400, len(points) * 50 + 120)
+    fig.update_layout(
+        title=dict(
+            text=("Server-side vs Client routing delay — hard_stop (median)<br>"
+                  "<sup><span style='color:#666;font-size:12px'>"
+                  "Server = DCS + election + promotion &nbsp;|&nbsp; "
+                  "Client = routing propagation to client</span></sup>"),
+            font=dict(size=17, family=FONT_FAMILY, color=DARK),
+        ),
+        font=dict(family=FONT_FAMILY, size=13, color=DARK),
+        plot_bgcolor=WHITE, paper_bgcolor=WHITE,
+        barmode="stack",
+        width=900, height=height,
+        margin=dict(l=220, r=100, t=80, b=60),
+        xaxis=dict(title="Time (s from first failure)", showgrid=True, gridcolor="#ecf0f1"),
+        yaxis=dict(showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1),
+    )
+
+    has_zero = any(p["client_delay"] == 0.0 for p in points)
+    footnote = (
+        "<p style='font-size:12px;color:#888;margin-top:8px'>"
+        "* Combos with zero client delay use client-side routing — the client reconnects "
+        "before all server events complete.</p>"
+        if has_zero else ""
+    )
+    return _plotly_html(fig) + footnote
+
+
 def _render_batch_waterfall(waterfall_data: dict) -> str:
     if not waterfall_data:
         return "<p><em>TimescaleDB not available or no data.</em></p>"
@@ -1365,14 +1463,20 @@ def _render_batch_waterfall(waterfall_data: dict) -> str:
         if t3 is not None:
             trows += f"<tr><td>Routing updated</td><td>{t3:.1f}s</td></tr>"
         trows += f"<tr><td><strong>Client recovered</strong></td><td><strong>{tc:.1f}s</strong></td></tr>"
-        server_vals = [v for v in [t0, t1, t2, t3, t4] if v is not None]
+        server_vals = [v for v in [t0, t1, t2, t3] if v is not None]
         if server_vals:
             server_done  = max(server_vals)
             client_delay = tc - server_done
-            client_pct   = int(round(client_delay / tc * 100)) if tc > 0 else 0
-            split_html = (f"<p style='font-size:13px;color:#555;margin:4px 0 8px'>"
-                          f"Server: {server_done:.1f}s &nbsp;|&nbsp; "
-                          f"Client routing delay: {client_delay:.1f}s ({client_pct}% of total)</p>")
+            if client_delay < 0:
+                split_html = (f"<p style='font-size:13px;color:#555;margin:4px 0 8px'>"
+                              f"Server: {server_done:.1f}s &nbsp;|&nbsp; "
+                              f"Client recovered {abs(client_delay):.1f}s before server events "
+                              f"completed (client-side routing)</p>")
+            else:
+                client_pct = int(round(client_delay / tc * 100)) if tc > 0 else 0
+                split_html = (f"<p style='font-size:13px;color:#555;margin:4px 0 8px'>"
+                              f"Server: {server_done:.1f}s &nbsp;|&nbsp; "
+                              f"Client routing delay: {client_delay:.1f}s ({client_pct}% of total)</p>")
         else:
             split_html = ""
         html += (f"<h3>{_h(label)}</h3>" + _plotly_html(fig) + split_html
@@ -1390,36 +1494,24 @@ def _render_batch_summary_table(df: pd.DataFrame) -> str:
         total, ok = len(df[df["combo_dir"] == combo]), len(sub)
         if ok > 0:
             med_dt = sub["downtime_s"].median()
-            min_dt = sub["downtime_s"].min()
-            max_dt = sub["downtime_s"].max()
             med_fq = sub["failed_queries"].median()
             try:
-                dt_str     = f"{med_dt:.1f}s" if not math.isnan(float(med_dt)) else "—"
-                min_str    = f"{min_dt:.1f}s" if not math.isnan(float(min_dt)) else "—"
-                max_str    = f"{max_dt:.1f}s" if not math.isnan(float(max_dt)) else "—"
-                if ok > 1 and not math.isnan(float(min_dt)) and not math.isnan(float(max_dt)):
-                    spread_str = f"{max_dt - min_dt:.1f}s"
-                else:
-                    spread_str = "—"
+                dt_str = f"{med_dt:.2f}s" if not math.isnan(float(med_dt)) else "—"
                 fq_str = str(int(med_fq)) if not math.isnan(float(med_fq)) else "—"
             except (TypeError, ValueError):
-                dt_str = min_str = max_str = spread_str = fq_str = "—"
+                dt_str = fq_str = "—"
             sc, sl = "pass", f"{ok}/{total} passed"
         else:
-            dt_str = min_str = max_str = spread_str = fq_str = "—"
-            sc, sl = "fail", f"0/{total} passed"
+            dt_str, fq_str, sc, sl = "—", "—", "fail", f"0/{total} passed"
         rows += (f"<tr><td>{_h(combo)}</td><td>{_h(LAYER_LABELS.get(combo, combo))}</td>"
-                 f"<td class='{sc}'>{sl}</td><td>{dt_str}</td>"
-                 f"<td>{min_str}</td><td>{max_str}</td><td>{spread_str}</td>"
-                 f"<td>{fq_str}</td></tr>\n")
+                 f"<td class='{sc}'>{sl}</td><td>{dt_str}</td><td>{fq_str}</td></tr>\n")
     return (f"<table><thead><tr><th>Combination ID</th><th>Description</th><th>Status</th>"
-            f"<th>Median downtime</th><th>Min</th><th>Max</th><th>Spread</th>"
-            f"<th>Median failed queries</th></tr></thead>"
+            f"<th>Median downtime</th><th>Median failed queries</th></tr></thead>"
             f"<tbody>\n{rows}</tbody></table>\n")
 
 def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
-    """Per-iteration detail table with server-side milestone offsets from TimescaleDB."""
-    rows_html = ""
+    """Per-iteration detail: one table per combination, with server-side milestone offsets."""
+    sections_html = ""
 
     for combo_id in sorted(df["combo_dir"].unique()):
         try:
@@ -1455,6 +1547,8 @@ def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
 
         label   = LAYER_LABELS.get(combo_id, combo_id)
         csv_sub = df[df["combo_dir"] == combo_id]
+        combo_rows = ""
+        scenario_counter: dict = collections.defaultdict(int)
 
         for _, csv_row in csv_sub.iterrows():
             scenario = csv_row.get("scenario", "unknown")
@@ -1465,21 +1559,25 @@ def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
             status   = csv_row.get("status", "—")
 
             scenario_runs = runs_by_scenario.get(scenario, [])
+            per_scenario_idx = scenario_counter[scenario]
+            scenario_counter[scenario] += 1
             try:
-                run_id = scenario_runs[int(iter_num) - 1]
+                run_id = scenario_runs[per_scenario_idx]
             except (TypeError, ValueError, IndexError):
                 run_id = None
 
             ms = milestone_by_rid.get(run_id, {}) if run_id else {}
             t0 = ms.get("T0"); t1 = ms.get("T1"); t2 = ms.get("T2")
-            t3 = ms.get("T3"); t4 = ms.get("T4"); tc = ms.get("Tc")
+            t3 = ms.get("T3"); tc = ms.get("Tc")
 
             def _fmt(v): return f"{v:.1f}s" if v is not None else "—"
 
-            server_vals = [v for v in [t0, t1, t2, t3, t4] if v is not None]
+            server_vals = [v for v in [t0, t1, t2, t3] if v is not None]
             server_done = max(server_vals) if server_vals else None
             if server_done is not None and tc is not None:
                 client_delay = tc - server_done
+                if client_delay < 0:
+                    client_delay = 0.0
                 sd_str = f"{server_done:.1f}s"
                 cd_str = f"{client_delay:.1f}s"
             else:
@@ -1497,9 +1595,8 @@ def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
                     highlight = ' style="background:#fef9e7"'
 
             sc_badge = "pass" if status == "SUCCESS" else "fail"
-            rows_html += (
+            combo_rows += (
                 f"<tr{highlight}>"
-                f"<td>{_h(label)}</td>"
                 f"<td><code>{_h(str(scenario))}</code></td>"
                 f"<td>{_h(str(iter_num))}</td>"
                 f"<td>{_h(str(leader))}</td>"
@@ -1515,22 +1612,28 @@ def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
                 f"</tr>\n"
             )
 
-    if not rows_html:
+        if combo_rows:
+            sections_html += (
+                f"<h3>{_h(label)}</h3>\n"
+                "<table><thead><tr>"
+                "<th>Scenario</th><th>Iter</th><th>Node Killed</th>"
+                "<th>Downtime</th><th>Failed Queries</th>"
+                "<th>DCS (T2)</th><th>Promote (T0)</th><th>Patroni (T1)</th>"
+                "<th>HAProxy (T3)</th><th>Client (Tc)</th>"
+                "<th>Server Done</th><th>Client Delay</th>"
+                "</tr></thead>"
+                f"<tbody>\n{combo_rows}</tbody></table>\n"
+            )
+
+    if not sections_html:
         return "<p><em>No iteration data available.</em></p>"
 
     return (
         "<p>All individual iterations with server-side milestone offsets (seconds from first "
-        "client failure). \"Server Done\" is the last server-side event; \"Client Delay\" is "
-        "additional time for the routing layer to propagate the change to the client. "
+        "client failure). \"Server Done\" is the last server-side routing event (max of T0–T3); "
+        "\"Client Delay\" is additional time for the change to reach the client. "
         "Rows highlighted in yellow have Client Delay &gt; 3× Server Done.</p>\n"
-        "<table><thead><tr>"
-        "<th>Combo</th><th>Scenario</th><th>Iter</th><th>Node Killed</th>"
-        "<th>Downtime</th><th>Failed Queries</th>"
-        "<th>DCS (T2)</th><th>Promote (T0)</th><th>Patroni (T1)</th>"
-        "<th>HAProxy (T3)</th><th>Client (Tc)</th>"
-        "<th>Server Done</th><th>Client Delay</th>"
-        "</tr></thead>"
-        f"<tbody>\n{rows_html}</tbody></table>\n"
+        + sections_html
     )
 
 
@@ -1644,7 +1747,7 @@ def cmd_combo_report(args):
     doc = (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
         "<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-        f"<title>Failover Report — {_h(combination_id)} — {_h(str(session_date))}</title>\n"
+        f"<title>Failover Report — {_h(LAYER_LABELS.get(combination_id, combination_id))} — {_h(str(session_date))}</title>\n"
         f"<style>{_CSS}</style>\n</head>\n<body>\n"
         + _render_header(combination_id, session_date, patroni_cfg, runs_df, iterations)
         + _render_summary_table(iterations)
@@ -1679,6 +1782,7 @@ def cmd_batch_report(args):
         print(f"[WARN] TimescaleDB unavailable: {e} — waterfall skipped", file=sys.stderr)
 
     waterfall_data: dict = {}
+    hero_html = ""
     if conn:
         for combo_id in sorted(df["combo_dir"].unique()):
             medians = _compute_waterfall(conn, combo_id)
@@ -1687,6 +1791,7 @@ def cmd_batch_report(args):
                 print(f"  {combo_id}: ok")
             else:
                 print(f"  {combo_id}: no data")
+        hero_html = _render_hero_chart(df, conn)
         conn.close()
 
     link_html = '<div class="combo-links">'
@@ -1721,8 +1826,9 @@ def cmd_batch_report(args):
             f"<h2>2. Downtime Heatmap — Combination × Scenario</h2>\n{_render_batch_heatmap(df)}\n"
             f"<h2>3. Per-Scenario Comparison</h2>\n{_render_batch_scenario_bars(df)}\n"
             f"<h2>4. Routing Layer Families</h2>\n{_render_batch_family_charts(df)}\n"
-            f"<h2>5. Failover Waterfall Timings</h2>\n{_render_batch_waterfall(waterfall_data)}\n"
-            f"<h2>6. Methodology &amp; Environment</h2>\n"
+            f"<h2>5. Server vs Client — Where Is the Time Spent?</h2>\n{hero_html}\n"
+            f"<h2>6. Failover Waterfall Timings</h2>\n{_render_batch_waterfall(waterfall_data)}\n"
+            f"<h2>7. Methodology &amp; Environment</h2>\n"
             f"<table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>\n"
             f"<tr><td>Batch CSV</td><td>{_h(str(csv_path))}</td></tr>\n"
             f"<tr><td>Generated</td><td>{generated}</td></tr>\n"
@@ -1745,7 +1851,7 @@ def cmd_batch_report(args):
         iter_html = "<p><em>Per-iteration detail requires TimescaleDB connection.</em></p>"
     html = html.replace(
         "</div>\n<footer>patroni-routing-bench",
-        f"<h2>7. Per-Iteration Detail</h2>\n{iter_html}\n"
+        f"<h2>8. Per-Iteration Detail</h2>\n{iter_html}\n"
         f"</div>\n<footer>patroni-routing-bench",
     )
 
