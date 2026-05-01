@@ -1785,7 +1785,7 @@ def cmd_batch_report(args):
     hero_html = ""
     if conn:
         for combo_id in sorted(df["combo_dir"].unique()):
-            medians = _compute_waterfall(conn, combo_id)
+            medians = _compute_waterfall(conn, combo_id, scenario="hard_stop")
             if medians:
                 waterfall_data[combo_id] = medians
                 print(f"  {combo_id}: ok")
@@ -1827,7 +1827,9 @@ def cmd_batch_report(args):
             f"<h2>3. Per-Scenario Comparison</h2>\n{_render_batch_scenario_bars(df)}\n"
             f"<h2>4. Routing Layer Families</h2>\n{_render_batch_family_charts(df)}\n"
             f"<h2>5. Server vs Client — Where Is the Time Spent?</h2>\n{hero_html}\n"
-            f"<h2>6. Failover Waterfall Timings</h2>\n{_render_batch_waterfall(waterfall_data)}\n"
+            f"<h2>6. Failover Waterfall Timings</h2>\n"
+            f"<p style='font-size:13px;color:#555;margin-bottom:12px'>Milestone offsets are medians across hard_stop iterations for each combination.</p>\n"
+            f"{_render_batch_waterfall(waterfall_data)}\n"
             f"<h2>7. Methodology &amp; Environment</h2>\n"
             f"<table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>\n"
             f"<tr><td>Batch CSV</td><td>{_h(str(csv_path))}</td></tr>\n"
