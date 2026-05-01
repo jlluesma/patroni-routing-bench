@@ -1509,6 +1509,224 @@ def _render_batch_summary_table(df: pd.DataFrame) -> str:
             f"<th>Median downtime</th><th>Median failed queries</th></tr></thead>"
             f"<tbody>\n{rows}</tbody></table>\n")
 
+def _categorize_error(error_text: str) -> str:
+    """Categorize a client error string into a human-readable type."""
+    if not error_text:
+        return "Unknown"
+    e = error_text.lower()
+    if "timeout" in e and "connect" in e:
+        return "Connect timeout"
+    if "timeout" in e:
+        return "Timeout"
+    if "connection refused" in e:
+        return "Connection refused"
+    if "resolve" in e or "name or service not known" in e:
+        return "DNS resolution failed"
+    if "shutting down" in e:
+        return "Server shutting down"
+    if "closed the connection unexpectedly" in e or "server closed" in e:
+        return "Connection closed by server"
+    if "read-write" in e or "target_session_attrs" in e:
+        return "Read-only (not primary)"
+    if "authentication" in e:
+        return "Authentication error"
+    return "Other"
+
+
+_LATENCY_TIMELINE_SQL = """
+WITH fw AS (
+    SELECT
+        MIN(ts) FILTER (WHERE NOT success)  AS first_failure,
+        MIN(ts) FILTER (WHERE success AND ts > (
+            SELECT MAX(ts) FROM client_events WHERE test_run_id = %s AND NOT success
+        ))                                   AS first_recovery
+    FROM client_events
+    WHERE test_run_id = %s
+)
+SELECT
+    EXTRACT(EPOCH FROM (ce.ts - fw.first_failure))::float         AS offset_s,
+    ce.success,
+    ce.latency_us / 1000.0                                        AS latency_ms,
+    ce.error,
+    EXTRACT(EPOCH FROM (fw.first_recovery - fw.first_failure))::float AS downtime_s
+FROM client_events ce, fw
+WHERE ce.test_run_id = %s
+  AND fw.first_failure IS NOT NULL
+  AND ce.ts >= fw.first_failure - INTERVAL '2 seconds'
+  AND ce.ts <= COALESCE(fw.first_recovery,
+                        fw.first_failure + INTERVAL '60 seconds') + INTERVAL '2 seconds'
+ORDER BY ce.ts
+"""
+
+
+def _render_client_failure_analysis(df: pd.DataFrame, conn) -> str:
+    """Per-combo error-type breakdown table across all failover scenarios."""
+    sections_html = ""
+
+    for combo_id in sorted(df["combo_dir"].unique()):
+        label = LAYER_LABELS.get(combo_id, combo_id)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ce.error, ce.latency_us "
+                    "FROM client_events ce "
+                    "JOIN test_runs tr ON tr.id = ce.test_run_id "
+                    "WHERE tr.combination_id = %s AND ce.success = false",
+                    [combo_id],
+                )
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f"  [WARN] Client failure query failed for {combo_id}: {e}", file=sys.stderr)
+            continue
+
+        if not rows:
+            continue
+
+        cat_data: dict = collections.defaultdict(lambda: {"count": 0, "latencies": []})
+        for error_text, latency_us in rows:
+            cat = _categorize_error(error_text)
+            cat_data[cat]["count"] += 1
+            if latency_us is not None:
+                cat_data[cat]["latencies"].append(float(latency_us))
+
+        total_failures = sum(d["count"] for d in cat_data.values())
+        table_rows = ""
+        for cat, data in sorted(cat_data.items(), key=lambda x: -x[1]["count"]):
+            count     = data["count"]
+            pct       = int(round(count / total_failures * 100)) if total_failures else 0
+            latencies = data["latencies"]
+            if latencies:
+                avg_us    = statistics.mean(latencies)
+                max_us    = max(latencies)
+                impact_s  = count * avg_us / 1_000_000
+                avg_str   = (f"{avg_us/1_000_000:.2f}s" if avg_us >= 1_000_000
+                             else f"{avg_us/1000:.0f}ms")
+                max_str   = (f"{max_us/1_000_000:.2f}s" if max_us >= 1_000_000
+                             else f"{max_us/1000:.0f}ms")
+                impact_str = (f"{impact_s:.1f}s total wait" if impact_s >= 0.1
+                              else f"{impact_s*1000:.0f}ms total wait")
+            else:
+                avg_us = 0
+                avg_str = max_str = impact_str = "—"
+
+            highlight    = ' style="background:#fef9e7"' if avg_us > 1_000_000 else ""
+            impact_style = ' style="color:#e74c3c;font-weight:bold"' if avg_us > 1_000_000 else ""
+            table_rows += (
+                f"<tr{highlight}>"
+                f"<td>{_h(cat)}</td>"
+                f"<td>{count}</td>"
+                f"<td>{pct}%</td>"
+                f"<td>{avg_str}</td>"
+                f"<td>{max_str}</td>"
+                f"<td{impact_style}>{_h(impact_str)}</td>"
+                f"</tr>\n"
+            )
+
+        sections_html += (
+            f"<h3>{_h(label)}</h3>\n"
+            "<table><thead><tr>"
+            "<th>Error Type</th><th>Count</th><th>% of Failures</th>"
+            "<th>Avg Latency</th><th>Max Latency</th><th>Impact</th>"
+            "</tr></thead>"
+            f"<tbody>\n{table_rows}</tbody></table>\n"
+        )
+
+    return sections_html or "<p><em>No client failure data available.</em></p>"
+
+
+def _render_client_latency_timeline(df: pd.DataFrame, conn) -> str:
+    """Per-combo scatter plot of client latency during a representative hard_stop failover."""
+    sections_html = ""
+
+    for combo_id in sorted(df["combo_dir"].unique()):
+        label = LAYER_LABELS.get(combo_id, combo_id)
+
+        hs = df[(df["combo_dir"] == combo_id) & (df["scenario"] == "hard_stop")].copy()
+        hs["downtime_s"] = _to_numeric(hs["downtime_s"])
+        hs = hs.dropna(subset=["downtime_s"]).reset_index(drop=True)
+        if hs.empty:
+            continue
+        median_dt   = hs["downtime_s"].median()
+        closest_idx = int((hs["downtime_s"] - median_dt).abs().idxmin())
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM test_runs "
+                    "WHERE combination_id = %s AND failover_type = 'hard_stop' "
+                    "ORDER BY started_at",
+                    [combo_id],
+                )
+                run_ids = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            print(f"  [WARN] Run ID query failed for {combo_id}: {e}", file=sys.stderr)
+            continue
+
+        if closest_idx >= len(run_ids):
+            continue
+        test_run_id = run_ids[closest_idx]
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_LATENCY_TIMELINE_SQL,
+                            [test_run_id, test_run_id, test_run_id])
+                tl_rows = cur.fetchall()
+        except Exception as e:
+            print(f"  [WARN] Latency timeline query failed for {combo_id}: {e}", file=sys.stderr)
+            continue
+
+        if not tl_rows:
+            continue
+
+        offsets    = [r[0] for r in tl_rows]
+        successes  = [r[1] for r in tl_rows]
+        latencies  = [max(float(r[2]), 0.01) for r in tl_rows]
+        downtime_s = tl_rows[0][4]
+
+        ok_x   = [o for o, s in zip(offsets, successes) if s]
+        ok_y   = [l for l, s in zip(latencies, successes) if s]
+        fail_x = [o for o, s in zip(offsets, successes) if not s]
+        fail_y = [l for l, s in zip(latencies, successes) if not s]
+        fail_sz = [12 if lat > 1000 else 5 for lat in fail_y]
+
+        fig = go.Figure()
+        if ok_x:
+            fig.add_trace(go.Scatter(
+                x=ok_x, y=ok_y, mode="markers",
+                marker=dict(color="#2ecc71", size=4),
+                name="Success",
+                hovertemplate="offset: %{x:.2f}s<br>latency: %{y:.1f}ms<extra></extra>",
+            ))
+        if fail_x:
+            fig.add_trace(go.Scatter(
+                x=fail_x, y=fail_y, mode="markers",
+                marker=dict(color="#e74c3c", size=fail_sz),
+                name="Failed",
+                hovertemplate="offset: %{x:.2f}s<br>latency: %{y:.1f}ms<extra></extra>",
+            ))
+        fig.add_vline(x=0, line=dict(color="#e74c3c", dash="dash", width=1.5),
+                      annotation_text="failure", annotation_position="top right")
+        if downtime_s is not None:
+            fig.add_vline(x=float(downtime_s),
+                          line=dict(color="#2ecc71", dash="dash", width=1.5),
+                          annotation_text="recovery", annotation_position="top left")
+        fig.update_layout(
+            title=dict(text=_h(label), font=dict(size=14, family=FONT_FAMILY, color=DARK)),
+            font=dict(family=FONT_FAMILY, size=12, color=DARK),
+            plot_bgcolor=WHITE, paper_bgcolor=WHITE,
+            width=800, height=300,
+            margin=dict(l=70, r=40, t=50, b=50),
+            xaxis=dict(title="Seconds from first failure",
+                       showgrid=True, gridcolor="#ecf0f1"),
+            yaxis=dict(title="Latency (ms)", type="log",
+                       showgrid=True, gridcolor="#ecf0f1"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        sections_html += f"<h3>{_h(label)}</h3>\n" + _plotly_html(fig) + "\n"
+
+    return sections_html or "<p><em>No client latency data available.</em></p>"
+
+
 def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
     """Per-iteration detail: one table per combination, with server-side milestone offsets."""
     sections_html = ""
@@ -1845,15 +2063,35 @@ def cmd_batch_report(args):
     if conn is not None:
         try:
             conn2 = get_connection()
-            iter_html = _render_per_iteration_table(df, conn2)
+            iter_html     = _render_per_iteration_table(df, conn2)
+            failure_html  = _render_client_failure_analysis(df, conn2)
+            timeline_html = _render_client_latency_timeline(df, conn2)
             conn2.close()
         except Exception as e:
-            iter_html = f"<p><em>Per-iteration detail unavailable: {e}</em></p>"
+            iter_html     = f"<p><em>Per-iteration detail unavailable: {e}</em></p>"
+            failure_html  = f"<p><em>Client failure analysis unavailable: {e}</em></p>"
+            timeline_html = f"<p><em>Client latency timeline unavailable: {e}</em></p>"
     else:
-        iter_html = "<p><em>Per-iteration detail requires TimescaleDB connection.</em></p>"
+        iter_html     = "<p><em>Per-iteration detail requires TimescaleDB connection.</em></p>"
+        failure_html  = "<p><em>Client failure analysis requires TimescaleDB connection.</em></p>"
+        timeline_html = "<p><em>Client latency timeline requires TimescaleDB connection.</em></p>"
     html = html.replace(
         "</div>\n<footer>patroni-routing-bench",
         f"<h2>8. Per-Iteration Detail</h2>\n{iter_html}\n"
+        f"<h2>9. Client Failure Analysis</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Error type breakdown during failover. \"Connect timeout\" errors indicate the "
+        f"client's TCP connection was accepted but not routed — the client waited the full "
+        f"connect_timeout (5s) before retrying. \"Connection refused\" and "
+        f"\"DNS resolution failed\" are instant failures (~2-7ms).</p>\n"
+        f"{failure_html}\n"
+        f"<h2>10. Client Latency Timeline</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Per-query latency during a representative hard_stop failover for each combination. "
+        f"Red dots are failed queries, green dots are successful. The red dashed line marks "
+        f"first failure; the green dashed line marks recovery. Y-axis is log scale — tall "
+        f"red dots are connect timeout hangs (5s), short red dots are instant failures (2-7ms).</p>\n"
+        f"{timeline_html}\n"
         f"</div>\n<footer>patroni-routing-bench",
     )
 
