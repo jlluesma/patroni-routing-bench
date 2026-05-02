@@ -125,7 +125,7 @@ Runs multiple combinations in sequence. Starts/stops each combo stack, runs the 
 ### Quick Reference
 
 ```bash
-# Run all combos (skip parked 05 and 10), 3 iterations, with reports
+# Run all combos (skip parked 05 and 10), 5 iterations, with reports
 ./runner/run_batch.sh --skip "05,10" --iterations 3 --generate-report --batch-report
 
 # Run only specific combos

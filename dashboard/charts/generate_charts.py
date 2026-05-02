@@ -2025,6 +2025,16 @@ def cmd_batch_report(args):
                           f'{_h(row["combo_dir"])}</span>')
     link_html += "</div>"
 
+    env_line = (
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"PostgreSQL 18 &nbsp;|&nbsp; Patroni 4.x &nbsp;|&nbsp; Consul &nbsp;|&nbsp; "
+        f"3 nodes &nbsp;|&nbsp; {len(df['scenario'].unique())} scenarios &nbsp;|&nbsp; "
+        f"{int(df.groupby(['combo_dir','scenario']).size().median())} iterations/scenario "
+        f"&nbsp;|&nbsp; Client heartbeat: 100ms &nbsp;|&nbsp; Observer poll: 100ms "
+        f"&nbsp;|&nbsp; Downtime = first failure → first success after last failure"
+        f"</p>\n"
+    )
+
     html = (f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
             f"<meta charset=\"UTF-8\">"
             f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
@@ -2040,7 +2050,7 @@ def cmd_batch_report(args):
             f"<div class=\"meta-item\"><label>Scenarios</label><span>{', '.join(sorted(df['scenario'].unique()))}</span></div>"
             f"<div class=\"meta-item\"><label>Git revision</label><span>{_git_rev()}</span></div>"
             f"</div>\n"
-            f"<h2>1. Results Summary</h2>\n{_render_batch_summary_table(df)}\n"
+            f"<h2>1. Results Summary</h2>\n{env_line}{_render_batch_summary_table(df)}\n"
             f"<h2>2. Downtime Heatmap — Combination × Scenario</h2>\n{_render_batch_heatmap(df)}\n"
             f"<h2>3. Per-Scenario Comparison</h2>\n{_render_batch_scenario_bars(df)}\n"
             f"<h2>4. Routing Layer Families</h2>\n{_render_batch_family_charts(df)}\n"
@@ -2048,17 +2058,7 @@ def cmd_batch_report(args):
             f"<h2>6. Failover Waterfall Timings</h2>\n"
             f"<p style='font-size:13px;color:#555;margin-bottom:12px'>Milestone offsets are medians across hard_stop iterations for each combination.</p>\n"
             f"{_render_batch_waterfall(waterfall_data)}\n"
-            f"<h2>7. Methodology &amp; Environment</h2>\n"
-            f"<table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>\n"
-            f"<tr><td>Batch CSV</td><td>{_h(str(csv_path))}</td></tr>\n"
-            f"<tr><td>Generated</td><td>{generated}</td></tr>\n"
-            f"<tr><td>Git revision</td><td>{_git_rev()}</td></tr>\n"
-            f"<tr><td>Docker version</td><td>{_docker_version()}</td></tr>\n"
-            f"<tr><td>Downtime measurement</td><td>First client failure → first success after last failure</td></tr>\n"
-            f"<tr><td>Waterfall T0</td><td>postgres pg_promote_requested</td></tr>\n"
-            f"<tr><td>Waterfall Tc</td><td>First client success after last failure</td></tr>\n"
-            f"</tbody></table>\n"
-            f"</div>\n<footer>patroni-routing-bench &mdash; batch report</footer>\n</body>\n</html>\n")
+            f"</div>\n<footer>patroni-routing-bench &mdash; {generated} &mdash; {_git_rev()}</footer>\n</body>\n</html>\n")
 
     if conn is not None:
         try:
@@ -2077,15 +2077,15 @@ def cmd_batch_report(args):
         timeline_html = "<p><em>Client latency timeline requires TimescaleDB connection.</em></p>"
     html = html.replace(
         "</div>\n<footer>patroni-routing-bench",
-        f"<h2>8. Per-Iteration Detail</h2>\n{iter_html}\n"
-        f"<h2>9. Client Failure Analysis</h2>\n"
+        f"<h2>7. Per-Iteration Detail</h2>\n{iter_html}\n"
+        f"<h2>8. Client Failure Analysis</h2>\n"
         f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
         f"Error type breakdown during failover. \"Connect timeout\" errors indicate the "
         f"client's TCP connection was accepted but not routed — the client waited the full "
         f"connect_timeout (5s) before retrying. \"Connection refused\" and "
         f"\"DNS resolution failed\" are instant failures (~2-7ms).</p>\n"
         f"{failure_html}\n"
-        f"<h2>10. Client Latency Timeline</h2>\n"
+        f"<h2>9. Client Latency Timeline</h2>\n"
         f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
         f"Per-query latency during a representative hard_stop failover for each combination. "
         f"Red dots are failed queries, green dots are successful. The red dashed line marks "

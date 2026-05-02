@@ -25,7 +25,7 @@ Client → 172.31.0.100:5432
 
 1. Patroni's `on_role_change` callback fires synchronously at every role transition.
 2. `vip_callback.sh` is called with `<action> <role> <scope>`.
-3. On `on_role_change primary`: the script runs `sudo ip addr add 172.31.0.100/24 dev eth0` and `sudo arping` to flush ARP caches.
+3. On `on_role_change primary`: the script runs `sudo ip addr add 172.31.0.100/24 dev eth0` and `sudo arping -c 3` to announce the VIP. Note: the VIP binds quickly (~0.07s after leader election), but client connections may hit a `connect_timeout` hang if PostgreSQL is still completing promotion when the first connection arrives.
 4. On `on_role_change replica` / `on_stop` / `on_restart`: the script runs `sudo ip addr del 172.31.0.100/24 dev eth0`.
 5. `post_init` (initial bootstrap): `vip_post_init.sh` binds the VIP immediately when the first primary is initialized.
 

@@ -173,3 +173,26 @@ Key views:
 
 ### Batch Run
 - 5-iteration batch (135 iterations) launched for stable medians and variance analysis.
+
+### Batch Report — Session 5 continued (April 30, 2026)
+- **Hero chart** (Section 5): "Server vs Client — Where Is the Time Spent?" horizontal stacked bar chart, hard_stop only, all 9 combos. Requires scenario-filtered `_compute_waterfall`.
+- **Waterfall filtered to hard_stop only**: prevents nonsensical phase ordering from mixed scenarios.
+- **Client Failure Analysis** (Section 8): error type breakdown per combo showing connect_timeout impact (count, avg latency, total wait time).
+- **Client Latency Timeline** (Section 9): scatter plot per combo showing per-query latency during failover (log scale, green=success, red=failure).
+- **Methodology merged into summary**: environment info as subtitle under Section 1, section removed, sections renumbered to 9 total.
+- **Combo 04 label fix**: per-combo reports use LAYER_LABELS in `<h1>` and `<title>`.
+- **Naming clarification**: "Client recovered" → "Client recovery (total)" in waterfall milestone tables.
+- **5-iteration batch completed**: 135/135 passed. Results in `runner/results/batch_20260429_220606/`.
+- **Additional 5-iteration Consul DNS run**: 10 total hard_stop iterations confirming 2.1–6.9s range driven by Consul service health check interval (5s).
+- **Article 2 investigation**: 5.1s from early manual testing was unreliable. Systematic testing shows 9.1s median.
+- **connect_timeout discovery**: HAProxy accepts TCP with no backend → 5s hangs. Verified via client_events data.
+- **Consul DNS variance root cause**: proved via Consul server logs that health check cycle alignment (not DNS TTL) causes 2.1–6.9s range.
+
+### Verified Configuration Values
+- Observer polling: 100ms (`POLL_INTERVAL_MS` in docker-compose)
+- Client heartbeat: 100ms interval, `connect_timeout=5s`, fresh connection per query
+- Consul service health check: 5s interval (from Patroni service registration)
+- Consul DNS TTL: 0s (`service_ttl: {"*": "0s"}` in consul.json)
+- HAProxy: `inter 2s, fall 3, rise 2, on-marked-down shutdown-sessions`
+- Patroni standard: `ttl 30, loop_wait 10, retry_timeout 10`
+- Patroni tuned: `ttl 20, loop_wait 5, retry_timeout 5`

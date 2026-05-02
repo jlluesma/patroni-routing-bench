@@ -49,14 +49,15 @@ soon as the new primary is ready to accept connections.
 4. Once the new primary is promoted, the next libpq attempt that lands
    on it succeeds immediately.
 
-### Why downtime is typically higher than combo 06
+### Why libpq multi-host is fast
 
 - libpq tries hosts **sequentially** — if the dead node is first in the
-  list, each attempt wastes up to `connect_timeout` seconds on it.
-- There is no health check pre-filtering: the client always tries all
-  hosts on every new connection.
-- Combo 06 (HAProxy) pre-filters unhealthy backends and routes straight
-  to the live primary once it passes health checks.
+  list, it gets instant "Connection refused" and moves to the next host.
+- With `target_session_attrs=read-write`, libpq skips replicas automatically.
+- No intermediate routing layer adds detection delay — the client
+  discovers the new primary directly.
+- Downtime depends on how many dead hosts are tried before the live one,
+  and the `connect_timeout` setting (currently 5s per host).
 
 ## Prerequisites
 

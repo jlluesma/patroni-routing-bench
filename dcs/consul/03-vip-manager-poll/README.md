@@ -28,7 +28,7 @@ Client → 172.30.3.100:5432
 2. All three vip-manager instances poll that key every 1 second.
 3. The instance whose configured `trigger-value` matches the key value binds `172.30.3.100/24` to `eth0` using `ip addr add`.
 4. All other vip-manager instances remove the VIP from their interface.
-5. An ARP announcement (gratuitous ARP) flushes ARP caches on the bench network so the client immediately routes to the new holder.
+5. vip-manager unbinds the VIP from the demoted node first, then binds it on the new leader. This ensures the client gets instant "Connection refused" during the transition rather than connecting to a stale endpoint.
 
 vip-manager shares the Patroni node's network namespace (`network_mode: service:patroni-nodeN`) so that the VIP it binds appears on the Patroni node's interface, not on a separate container interface.
 

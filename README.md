@@ -74,31 +74,34 @@ See [`tool/README.md`](tool/README.md) for full documentation, including how to 
 
 ## Benchmark Results
 
-We used this tool to benchmark 9 routing strategies in a controlled Docker environment. 81 test runs (9 combinations × 3 scenarios × 3 iterations), all successful.
+We used this tool to benchmark 9 routing strategies in a controlled Docker environment. 135 test runs (9 combinations × 3 scenarios × 5 iterations), all successful.
 
 Median client-perceived downtime (seconds):
 
 | Combination | Category | hard_stop | hard_kill | switchover |
 |---|---|---|---|---|
-| 01 — libpq multi-host | Client | 1.3s | 22.2s | 1.3s |
-| 03 — vip-manager (poll) | VIP | 1.4s | 26.4s | 1.1s |
-| 07 — consul-template reload | HAProxy | 5.2s | 25.7s | 4.7s |
-| 02 — Consul DNS | DNS | 6.6s | 29.1s | 2.1s |
-| 04 — VIP Patroni callback | VIP | 6.8s | 26.1s | 4.3s |
-| 06 — HAProxy REST poll | HAProxy | 9.1s | 29.5s | 6.4s |
-| 06t — HAProxy REST poll (tuned) | HAProxy | 9.1s | 21.5s | 6.4s |
-| 08 — consul-template runtime API | HAProxy | 9.1s | 30.3s | 4.0s |
-| 09 — Patroni callback → HAProxy | HAProxy | 10.9s | 26.0s | 6.0s |
+| 03 — vip-manager (poll) | VIP | 1.2s | 23.0s | 1.0s |
+| 01 — libpq multi-host | Client | 1.3s | 21.2s | 1.2s |
+| 02 — Consul DNS | DNS | 2.1s | 28.4s | 2.1s |
+| 07 — consul-template reload | HAProxy | 5.2s | 23.8s | 4.6s |
+| 04 — VIP Patroni callback | VIP | 6.6s | 26.1s | 4.1s |
+| 06 — HAProxy REST poll | HAProxy | 9.1s | 29.1s | 6.2s |
+| 06t — HAProxy REST poll (tuned) | HAProxy | 9.2s | 20.0s | 5.6s |
+| 09 — Patroni callback → HAProxy | HAProxy | 9.2s | 30.8s | 6.6s |
+| 08 — consul-template runtime API | HAProxy | 10.1s | 29.4s | 4.0s |
 
-> **Note:** Results are from a Docker Desktop / WSL2 environment. VIP combinations include Docker-specific ARP cache overhead not present in bare-metal deployments. Use the tool on your own infrastructure for production-representative numbers.
+> **Note:** Results are from a Docker Desktop / WSL2 environment with the full observer stack. Absolute numbers will differ on production hardware. Use the tool on your own infrastructure for production-representative numbers.
 
 ### Key Findings
 
-- **Graceful failovers (hard_stop, switchover) vary 10×** across routing layers — from 1.2s (libpq) to 9.4s (HAProxy polling).
-- **Ungraceful failovers (hard_kill) are dominated by the Consul session TTL** (30s default). All combinations converge to 20–30s regardless of routing layer.
-- **The simplest approach (libpq multi-host) is the fastest.** Adding infrastructure (HAProxy, VIP) adds latency for failover detection, not removes it. The value of a proxy is operational (connection pooling, read/write split, observability), not failover speed.
-- **consul-template + reload (combo 07) is the fastest HAProxy variant** — event-driven detection vs periodic polling.
-- **VIP poll (combo 03) is fastest overall** for graceful failures with dedicated routing infrastructure.
+- **Graceful failovers (hard_stop, switchover) vary across routing layers** — from 1.2s (VIP poll) to 10.1s (consul-template Runtime API).
+- **Ungraceful failovers (hard_kill) are dominated by the Consul session TTL** (30s default). All combinations converge to 20–31s regardless of routing layer. Reducing TTL from 30 to 20 improved hard_kill by 31%.
+- **The simplest approaches are the fastest.** VIP poll (1.2s) and libpq multi-host (1.3s) match or beat every infrastructure-based routing layer. The value of a proxy is operational (connection pooling, read/write split, observability), not failover speed.
+- **Server-side failover is fast and consistent.** DCS detection + PostgreSQL promotion takes ~3.8 seconds across all 9 combinations. The routing layer is where time is lost.
+- **consul-template + reload (combo 07) is the fastest HAProxy variant** at 5.2s — event-driven detection plus a full reload that bypasses rise threshold delays.
+- **Consul DNS speed depends on health check timing, not DNS TTL.** With TTL=0s, failover ranges from 2.1s to 6.9s depending on where in the 5s health check cycle the promotion lands.
+- **HAProxy accepts TCP connections with no healthy backend**, causing 5-second connect_timeout hangs. Reducing connect_timeout is a client-side tuning that directly reduces measured failover time.
+- **Failure mode matters more than routing layer.** The difference between graceful (1–10s) and ungraceful (20–31s) failure dwarfs routing layer differences. Ensure clean shutdowns.
 
 ### Per-Component Timing Breakdown
 
@@ -120,7 +123,7 @@ With libpq multi-host, the client detects the new primary directly — no routin
 
 ![Phase Breakdown — HAProxy](docs/images/phases_haproxy_hard_stop.png)
 
-Each routing layer shifts the bottleneck to a different component. HAProxy combinations are dominated by health check polling. VIP combinations are bounded by ARP cache propagation. DNS combinations depend on TTL expiry. The tool makes these bottleneck shifts visible.
+Each routing layer shifts the bottleneck to a different component. HAProxy combinations are dominated by health check polling intervals and client connect_timeout hangs. VIP poll (combo 03) is fast because clients get instant "Connection refused" during transition. VIP callback (combo 04) is slower because client connections can reach the new node before PostgreSQL promotion completes, causing connect_timeout hangs. Consul DNS combinations depend on the Consul service health check interval (5s), not DNS TTL. The tool makes these bottleneck shifts visible.
 
 > **Key insight:** Tuning Patroni (`loop_wait`, `ttl`) only helps when Patroni is the bottleneck. If the routing layer dominates (as in HAProxy combinations), reducing `loop_wait` from 10s to 5s has zero impact on total downtime. The per-component breakdown tells you where to focus optimization effort.
 
@@ -131,7 +134,7 @@ During a `hard_stop` failover with HAProxy REST polling:
 | Phase | Typical Duration | What Happens |
 |---|---|---|
 | DCS detection | ~1s | Consul blocking query detects leader key change |
-| PostgreSQL promotion | ~2.7s | New primary accepts connections (PG ready: 3.7s after failure) |
+| PostgreSQL promotion | ~2.7s | New primary accepts connections (PG ready: 3.8s after failure) |
 | Routing detection | ~5.4s | HAProxy health checks detect the new primary (`inter 2s × fall 3`) |
 | Client recovery | ~0s | Client reconnects immediately once HAProxy switches |
 | **Total downtime** | **~9.1s** | End-to-end client-perceived outage |
