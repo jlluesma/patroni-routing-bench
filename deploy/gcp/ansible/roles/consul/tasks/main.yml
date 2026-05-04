@@ -1,0 +1,87 @@
+---
+- name: Create consul group
+  group:
+    name: consul
+    system: true
+
+- name: Create consul user
+  user:
+    name: consul
+    group: consul
+    system: true
+    shell: /bin/false
+    home: /opt/consul
+
+- name: Create consul directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: consul
+    group: consul
+    mode: "0750"
+  loop:
+    - "{{ consul_data_dir }}"
+    - "{{ consul_config_dir }}"
+
+- name: Check if Consul binary exists
+  stat:
+    path: /usr/local/bin/consul
+  register: consul_binary
+
+- name: Download and install Consul
+  when: not consul_binary.stat.exists
+  block:
+    - name: Download Consul archive
+      get_url:
+        url: "https://releases.hashicorp.com/consul/{{ consul_version }}/consul_{{ consul_version }}_linux_amd64.zip"
+        dest: /tmp/consul.zip
+        mode: "0644"
+
+    - name: Unzip Consul
+      unarchive:
+        src: /tmp/consul.zip
+        dest: /usr/local/bin
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Remove archive
+      file:
+        path: /tmp/consul.zip
+        state: absent
+
+- name: Deploy consul server config
+  template:
+    src: consul-server.json.j2
+    dest: "{{ consul_config_dir }}/consul.json"
+    owner: consul
+    group: consul
+    mode: "0640"
+  when: "'consul' in group_names"
+  notify: restart consul
+
+- name: Deploy consul agent config (Patroni nodes)
+  template:
+    src: consul-agent.json.j2
+    dest: "{{ consul_config_dir }}/consul.json"
+    owner: consul
+    group: consul
+    mode: "0640"
+  when: "'patroni' in group_names"
+  notify: restart consul
+
+- name: Install consul systemd unit
+  template:
+    src: consul.service.j2
+    dest: /etc/systemd/system/consul.service
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart consul
+
+- name: Enable and start consul
+  service:
+    name: consul
+    state: started
+    enabled: true

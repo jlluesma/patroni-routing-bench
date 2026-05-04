@@ -1,0 +1,12 @@
+---
+# Static internal IPs — must match Terraform locals.ip
+patroni_1_ip:   "10.0.1.10"
+patroni_2_ip:   "10.0.1.11"
+patroni_3_ip:   "10.0.1.12"
+consul_server_ip: "10.0.1.20"
+haproxy_ip:     "10.0.1.30"
+observer_ip:    "10.0.1.40"
+
+# Repo
+repo_url: "https://github.com/jlluesma/patroni-routing-bench.git"
+repo_dest: "/opt/patroni-routing-bench"

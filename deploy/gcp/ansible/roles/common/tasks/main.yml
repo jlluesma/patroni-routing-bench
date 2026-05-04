@@ -1,0 +1,48 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install common packages
+  apt:
+    name:
+      - curl
+      - wget
+      - gnupg
+      - software-properties-common
+      - chrony
+      - net-tools
+      - jq
+      - htop
+      - unzip
+      - python3
+      - python3-pip
+      - python3-psycopg2
+    state: present
+
+- name: Configure sysctl for PostgreSQL
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { name: "vm.overcommit_memory",  value: "2" }
+    - { name: "vm.overcommit_ratio",   value: "80" }
+    - { name: "vm.swappiness",         value: "1" }
+    - { name: "net.core.somaxconn",    value: "1024" }
+
+# GCP VMs use Google NTP by default (metadata.google.internal).
+# Chrony is already configured correctly on Ubuntu 24.04 GCP images.
+# Verify: chronyc tracking | grep "System time"  → expect < 1ms
+- name: Ensure chrony is running
+  service:
+    name: chrony
+    state: started
+    enabled: true
+
+- name: Set timezone to UTC
+  timezone:
+    name: UTC

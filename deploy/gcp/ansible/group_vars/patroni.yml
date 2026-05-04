@@ -1,0 +1,18 @@
+---
+postgresql_version: "18"
+postgresql_data_dir: "/var/lib/postgresql/18/main"
+postgresql_port: 5432
+
+patroni_scope: "bench"
+patroni_namespace: "/service/"
+patroni_restapi_port: 8008
+
+# DCS timing — matches Docker benchmark defaults for fair comparison
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+patroni_maximum_lag_on_failover: 1048576
+
+postgresql_superuser_password: "postgres"
+postgresql_replicator_password: "replicator"
+postgresql_rewind_password: "rewind"

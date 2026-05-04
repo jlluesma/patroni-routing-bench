@@ -1,0 +1,66 @@
+###############################################################################
+# HAProxy — patroni-routing-bench GCP deployment
+# Combination 06 equivalent: REST polling against Patroni /primary endpoint
+###############################################################################
+
+global
+    maxconn 1000
+    log stdout format raw local0
+    stats socket /var/run/haproxy/admin.sock mode 660 level admin
+
+defaults
+    mode tcp
+    log global
+    option log-health-checks
+    retries 3
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+    timeout check 2s
+
+# ---------------------------------------------------------------------------
+# Stats & Prometheus endpoint
+# ---------------------------------------------------------------------------
+frontend stats
+    bind *:{{ haproxy_stats_port }}
+    mode http
+    http-request use-service prometheus-exporter if { path /metrics }
+    stats enable
+    stats uri /stats
+    stats refresh 5s
+    stats show-legends
+
+# ---------------------------------------------------------------------------
+# Primary (read-write) — port {{ haproxy_primary_port }}
+# Routes to whichever node responds 200 on /primary
+# ---------------------------------------------------------------------------
+frontend primary_frontend
+    bind *:{{ haproxy_primary_port }}
+    default_backend primary_backend
+
+backend primary_backend
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter {{ haproxy_check_inter }} fall {{ haproxy_check_fall }} rise {{ haproxy_check_rise }} on-marked-down {{ haproxy_on_marked_down }}
+
+{% for host in groups['patroni'] %}
+    server {{ host }} {{ hostvars[host]['internal_ip'] }}:5432 check port 8008
+{% endfor %}
+
+# ---------------------------------------------------------------------------
+# Replicas (read-only) — port {{ haproxy_replica_port }}
+# Routes to nodes that respond 200 on /replica
+# ---------------------------------------------------------------------------
+frontend replica_frontend
+    bind *:{{ haproxy_replica_port }}
+    default_backend replica_backend
+
+backend replica_backend
+    option httpchk GET /replica
+    http-check expect status 200
+    balance roundrobin
+    default-server inter {{ haproxy_check_inter }} fall {{ haproxy_check_fall }} rise {{ haproxy_check_rise }} on-marked-down {{ haproxy_on_marked_down }}
+
+{% for host in groups['patroni'] %}
+    server {{ host }} {{ hostvars[host]['internal_ip'] }}:5432 check port 8008
+{% endfor %}

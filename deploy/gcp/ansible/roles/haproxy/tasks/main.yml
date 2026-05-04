@@ -1,0 +1,29 @@
+---
+- name: Install HAProxy
+  apt:
+    name: haproxy
+    state: present
+
+- name: Create HAProxy runtime directory
+  file:
+    path: /var/run/haproxy
+    state: directory
+    owner: haproxy
+    group: haproxy
+    mode: "0750"
+
+- name: Deploy haproxy.cfg
+  template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: haproxy
+    mode: "0640"
+    validate: "haproxy -c -f %s"
+  notify: restart haproxy
+
+- name: Enable and start HAProxy
+  service:
+    name: haproxy
+    state: started
+    enabled: true

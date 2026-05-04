@@ -1,0 +1,37 @@
+---
+- name: Common setup on all hosts
+  hosts: all
+  become: true
+  roles:
+    - common
+
+- name: Deploy Consul server
+  hosts: consul
+  become: true
+  roles:
+    - consul
+
+- name: Deploy PostgreSQL
+  hosts: patroni
+  become: true
+  roles:
+    - postgresql
+
+- name: Deploy Patroni (includes Consul agent)
+  hosts: patroni
+  become: true
+  roles:
+    - consul
+    - patroni
+
+- name: Deploy HAProxy
+  hosts: haproxy
+  become: true
+  roles:
+    - haproxy
+
+- name: Deploy observer VM (Docker + tool/)
+  hosts: observer
+  become: true
+  roles:
+    - observer

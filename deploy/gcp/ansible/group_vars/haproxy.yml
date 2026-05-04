@@ -1,0 +1,10 @@
+---
+haproxy_stats_port: 8404
+haproxy_primary_port: 5000
+haproxy_replica_port: 5001
+
+# Health check parameters — matches Docker benchmark combo 06 defaults
+haproxy_check_inter: "2s"
+haproxy_check_fall: 3
+haproxy_check_rise: 2
+haproxy_on_marked_down: "shutdown-sessions"

@@ -1,0 +1,14 @@
+{
+  "datacenter": "{{ consul_datacenter }}",
+  "data_dir": "{{ consul_data_dir }}",
+  "log_level": "INFO",
+  "advertise_addr": "{{ internal_ip }}",
+  "bind_addr": "0.0.0.0",
+  "client_addr": "0.0.0.0",
+  "retry_join": ["{{ consul_server_ip }}"],
+  "ports": {
+    "http": 8500,
+    "dns":  8600,
+    "serf_lan": 8301
+  }
+}

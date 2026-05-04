@@ -1,0 +1,6 @@
+---
+consul_version: "1.19.2"
+consul_datacenter: "dc1"
+consul_log_level: "DEBUG"
+consul_data_dir: "/opt/consul/data"
+consul_config_dir: "/etc/consul.d"

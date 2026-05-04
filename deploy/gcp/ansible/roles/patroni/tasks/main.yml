@@ -1,0 +1,40 @@
+---
+- name: Create /etc/patroni directory
+  file:
+    path: /etc/patroni
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Create log directory for PostgreSQL
+  file:
+    path: /var/log/postgresql
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Deploy patroni.yml
+  template:
+    src: patroni.yml.j2
+    dest: /etc/patroni/patroni.yml
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: restart patroni
+
+- name: Install patroni systemd unit
+  template:
+    src: patroni.service.j2
+    dest: /etc/systemd/system/patroni.service
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart patroni
+
+- name: Enable and start Patroni
+  service:
+    name: patroni
+    state: started
+    enabled: true

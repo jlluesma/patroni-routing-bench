@@ -1,0 +1,25 @@
+{
+  "server": true,
+  "bootstrap_expect": 1,
+  "datacenter": "{{ consul_datacenter }}",
+  "data_dir": "{{ consul_data_dir }}",
+  "log_level": "{{ consul_log_level }}",
+  "advertise_addr": "{{ internal_ip }}",
+  "bind_addr": "0.0.0.0",
+  "client_addr": "0.0.0.0",
+  "ui_config": {
+    "enabled": true
+  },
+  "ports": {
+    "http": 8500,
+    "dns":  8600,
+    "serf_lan": 8301,
+    "serf_wan": 8302,
+    "server": 8300
+  },
+  "dns_config": {
+    "service_ttl": {
+      "*": "0s"
+    }
+  }
+}

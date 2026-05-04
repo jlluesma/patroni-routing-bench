@@ -1,0 +1,51 @@
+---
+- name: Install PostgreSQL GPG key
+  apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+
+- name: Add PGDG apt repository
+  apt_repository:
+    repo: "deb http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+    state: present
+    filename: pgdg
+
+- name: Update apt cache after adding PGDG repo
+  apt:
+    update_cache: true
+
+- name: Install PostgreSQL {{ postgresql_version }}
+  apt:
+    name:
+      - "postgresql-{{ postgresql_version }}"
+      - "postgresql-client-{{ postgresql_version }}"
+      - "postgresql-server-dev-{{ postgresql_version }}"
+    state: present
+
+# Patroni manages PostgreSQL lifecycle — stop and disable the default service
+- name: Stop and disable postgresql default service
+  service:
+    name: postgresql
+    state: stopped
+    enabled: false
+
+- name: Remove default cluster created by apt install
+  command: "pg_dropcluster --stop {{ postgresql_version }} main"
+  args:
+    removes: "/etc/postgresql/{{ postgresql_version }}/main/postgresql.conf"
+
+- name: Create PostgreSQL data directory
+  file:
+    path: "{{ postgresql_data_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Install Python dependencies for Patroni
+  pip:
+    name:
+      - "patroni[consul]"
+      - psycopg2-binary
+    executable: pip3
+    state: present
