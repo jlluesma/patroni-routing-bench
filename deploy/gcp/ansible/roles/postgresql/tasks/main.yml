@@ -49,3 +49,4 @@
       - psycopg2-binary
     executable: pip3
     state: present
+    extra_args: --break-system-packages
