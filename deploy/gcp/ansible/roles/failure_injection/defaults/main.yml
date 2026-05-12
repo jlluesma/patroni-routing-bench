@@ -1,0 +1,18 @@
+---
+# Subnet used by the Patroni cluster (from Terraform)
+cluster_subnet: "10.0.1.0/24"
+
+# Patroni service name
+patroni_service: "patroni"
+
+# PostgreSQL data directory
+pg_data_dir: "/var/lib/postgresql/18/main"
+
+# Seconds to wait after injecting recovery actions before declaring done
+recovery_wait_seconds: 10
+
+# Partition mode: "full" (drop all cluster traffic) or "asymmetric" (drop specific peers)
+partition_mode: "full"
+
+# For asymmetric partition: list of IPs to block (e.g. ["10.0.1.20", "10.0.1.11"])
+partition_block_ips: []

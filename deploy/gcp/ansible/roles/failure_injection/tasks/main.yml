@@ -1,0 +1,8 @@
+---
+- name: Run failure scenario
+  include_tasks: "{{ scenario }}.yml"
+  when: scenario is defined and not (recover | default(false) | bool)
+
+- name: Run recovery
+  include_tasks: recover.yml
+  when: recover | default(false) | bool

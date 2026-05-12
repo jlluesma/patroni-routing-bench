@@ -1,0 +1,26 @@
+---
+# inject.yml — inject or recover from a failure scenario on a target node
+#
+# Required vars:
+#   scenario   — hard_stop | hard_kill | switchover | network_partition | postgres_crash
+#   target     — inventory hostname (default: patroni-1)
+#
+# Optional vars:
+#   recover            — true to run recovery instead of injection (default: false)
+#   partition_mode     — full | asymmetric (default: full)
+#   partition_block_ips — list of IPs for asymmetric partition
+#
+# Examples:
+#   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e target=patroni-1
+#   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e recover=true -e target=patroni-1
+#   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=network_partition \
+#       -e partition_mode=asymmetric -e '{"partition_block_ips":["10.0.1.20"]}' -e target=patroni-1
+
+- name: Inject failure scenario
+  hosts: "{{ target | default('patroni-1') }}"
+  become: true
+  roles:
+    - role: failure_injection
+      vars:
+        scenario: "{{ scenario | default('') }}"
+        recover: "{{ recover | default(false) }}"

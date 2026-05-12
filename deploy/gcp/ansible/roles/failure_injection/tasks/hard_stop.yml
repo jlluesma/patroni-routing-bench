@@ -1,0 +1,13 @@
+---
+- name: Stop Patroni gracefully (SIGTERM)
+  systemd:
+    name: "{{ patroni_service }}"
+    state: stopped
+  become: true
+
+- name: Hard stop applied
+  debug:
+    msg: >
+      Patroni stopped on {{ inventory_hostname }}.
+      Consul session released immediately.
+      Recovery: ansible-playbook inject.yml -e scenario=hard_stop -e recover=true -l {{ inventory_hostname }}

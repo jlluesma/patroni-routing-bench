@@ -1,0 +1,54 @@
+---
+- name: "Network partition — full isolation from cluster subnet"
+  when: partition_mode == "full"
+  block:
+    - name: Drop all inbound cluster traffic
+      iptables:
+        chain: INPUT
+        source: "{{ cluster_subnet }}"
+        jump: DROP
+        comment: "patroni-bench: network partition"
+      become: true
+
+    - name: Drop all outbound cluster traffic
+      iptables:
+        chain: OUTPUT
+        destination: "{{ cluster_subnet }}"
+        jump: DROP
+        comment: "patroni-bench: network partition"
+      become: true
+
+    - name: Full partition applied
+      debug:
+        msg: >
+          Node {{ inventory_hostname }} fully isolated from {{ cluster_subnet }}.
+          Consul session will expire after TTL (~30s).
+          Recovery: ansible-playbook inject.yml -e scenario=network_partition -e recover=true -l {{ inventory_hostname }}
+
+- name: "Network partition — asymmetric (block specific peers only)"
+  when: partition_mode == "asymmetric"
+  block:
+    - name: Drop inbound from specific peers
+      iptables:
+        chain: INPUT
+        source: "{{ item }}"
+        jump: DROP
+        comment: "patroni-bench: asymmetric partition from {{ item }}"
+      become: true
+      loop: "{{ partition_block_ips }}"
+
+    - name: Drop outbound to specific peers
+      iptables:
+        chain: OUTPUT
+        destination: "{{ item }}"
+        jump: DROP
+        comment: "patroni-bench: asymmetric partition to {{ item }}"
+      become: true
+      loop: "{{ partition_block_ips }}"
+
+    - name: Asymmetric partition applied
+      debug:
+        msg: >
+          Node {{ inventory_hostname }} blocked from: {{ partition_block_ips | join(', ') }}.
+          Still reachable from other cluster members.
+          Recovery: ansible-playbook inject.yml -e scenario=network_partition -e recover=true -l {{ inventory_hostname }}

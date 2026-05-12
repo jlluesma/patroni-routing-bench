@@ -6,3 +6,5 @@ __pycache__/
 
 # Benchmark results (per-run data, not source)
 runner/results/
+google-cloud-sdk/
+google-cloud-sdk/.install/

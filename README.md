@@ -231,6 +231,48 @@ cd ~/patroni-routing-bench/dashboard && docker compose down -v
 
 ---
 
+## Running on GCP
+
+The Docker benchmark runs in containers on a single machine — fast to set up, but Docker networking adds overhead (no real ARP, overlay bridging, WSL2 variance). To validate results on production-representative infrastructure, deploy to real GCP Compute Engine VMs using the Terraform + Ansible setup in `deploy/gcp/`.
+
+**6 VMs, ~$0.17/hr, ~$0.35 per test session.**
+
+```
+patroni-1/2/3 (e2-medium)  — PostgreSQL 18 + Patroni + Consul agent
+consul-srv    (e2-small)   — Consul server (DCS)
+haproxy       (e2-small)   — HAProxy REST polling (combo 06 equivalent)
+observer      (e2-medium)  — Docker + tool/ stack, generates reports
+```
+
+```bash
+# 1. Deploy infrastructure
+cd deploy/gcp/terraform
+cp terraform.tfvars.example terraform.tfvars   # set project_id
+terraform init && terraform apply              # writes ansible/inventory/gcp.ini
+
+# 2. Configure the cluster
+cd ../ansible
+ansible-playbook -i inventory/gcp.ini site.yml
+
+# 3. Run the tool from the observer VM
+ssh deploy@$(cd ../terraform && terraform output -raw observer_external_ip)
+cd /opt/patroni-routing-bench/tool && cp .env.gcp .env
+docker compose up -d && docker compose --profile failover up -d
+
+# 4. Inject a failover
+cd deploy/gcp
+./scripts/failover-test.sh --scenario hard_stop --target patroni-1
+
+# 5. Tear down
+./scripts/teardown.sh
+```
+
+Failure injection uses Ansible (`deploy/gcp/ansible/inject.yml` with the `failure_injection` role) rather than raw SSH — supports `hard_stop`, `hard_kill`, `switchover`, `postgres_crash`, and `network_partition` (real `iptables DROP`, not Docker disconnect).
+
+See [`deploy/gcp/README.md`](deploy/gcp/README.md) for full documentation, cost breakdown, and expected impact on results vs the Docker benchmark.
+
+---
+
 ## Observer Agents
 
 Lightweight Python daemons that watch each infrastructure component and emit timestamped state-change events to TimescaleDB.
@@ -278,6 +320,11 @@ patroni-routing-bench/
 │   ├── postgres-patroni/             # PostgreSQL 18 + Patroni base image
 │   ├── client/                       # Heartbeat client
 │   └── observer/                     # Observer agent
+│
+├── deploy/gcp/                       # GCP DEPLOYMENT — real VMs, Terraform + Ansible
+│   ├── terraform/                    # VPC, 6 VMs, generates Ansible inventory
+│   ├── ansible/                      # site.yml + roles (common, consul, postgresql, patroni, haproxy, observer)
+│   └── scripts/                      # failover-test.sh, teardown.sh
 │
 └── observer/schema/                  # TimescaleDB schema (canonical)
 ```

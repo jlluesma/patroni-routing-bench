@@ -1,0 +1,25 @@
+---
+- name: Flush iptables INPUT (network partition recovery)
+  shell: "iptables -F INPUT"
+  become: true
+  ignore_errors: true
+
+- name: Flush iptables OUTPUT (network partition recovery)
+  shell: "iptables -F OUTPUT"
+  become: true
+  ignore_errors: true
+
+- name: Start Patroni (hard_stop / hard_kill recovery)
+  systemd:
+    name: "{{ patroni_service }}"
+    state: started
+  become: true
+  ignore_errors: true
+
+- name: Wait for recovery to propagate
+  pause:
+    seconds: "{{ recovery_wait_seconds }}"
+
+- name: Recovery complete
+  debug:
+    msg: "Recovery actions applied on {{ inventory_hostname }}. Waiting for cluster to stabilise."

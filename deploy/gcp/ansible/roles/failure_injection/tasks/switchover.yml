@@ -1,0 +1,12 @@
+---
+- name: Trigger planned switchover away from this node
+  shell: >
+    patronictl -c /etc/patroni/patroni.yml switchover
+    --leader {{ inventory_hostname }}
+    --force
+  become: true
+  become_user: postgres
+
+- name: Switchover triggered
+  debug:
+    msg: "Switchover initiated away from {{ inventory_hostname }}. No recovery needed."

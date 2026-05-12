@@ -1,0 +1,17 @@
+---
+- name: Kill Patroni with SIGKILL
+  shell: "kill -9 $(pgrep -f patroni) 2>/dev/null || true"
+  become: true
+  ignore_errors: true
+
+- name: Kill PostgreSQL postmaster with SIGKILL
+  shell: "kill -9 $(pgrep -o postgres) 2>/dev/null || true"
+  become: true
+  ignore_errors: true
+
+- name: Hard kill applied
+  debug:
+    msg: >
+      Patroni and PostgreSQL killed on {{ inventory_hostname }}.
+      Consul session will expire after TTL (~30s).
+      Recovery: ansible-playbook inject.yml -e scenario=hard_kill -e recover=true -l {{ inventory_hostname }}

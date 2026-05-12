@@ -1,0 +1,13 @@
+---
+- name: Kill PostgreSQL postmaster (Patroni stays running)
+  shell: "kill -9 $(head -1 {{ pg_data_dir }}/postmaster.pid)"
+  become: true
+  become_user: postgres
+
+- name: PostgreSQL crashed
+  debug:
+    msg: >
+      Postmaster killed on {{ inventory_hostname }}.
+      Patroni will detect the crash and attempt a local restart.
+      If restart fails, Patroni will trigger a failover.
+      No manual recovery needed — Patroni handles it.
