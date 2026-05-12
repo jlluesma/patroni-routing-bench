@@ -6,5 +6,12 @@ __pycache__/
 
 # Benchmark results (per-run data, not source)
 runner/results/
+
+# GCP / Terraform — local state and secrets, never commit
 google-cloud-sdk/
-google-cloud-sdk/.install/
+google-cloud-cli-*.tar.gz
+deploy/gcp/terraform/.terraform/
+deploy/gcp/terraform/terraform.tfstate
+deploy/gcp/terraform/terraform.tfstate.backup
+deploy/gcp/terraform/terraform.tfvars
+deploy/gcp/ansible/inventory/gcp.ini
