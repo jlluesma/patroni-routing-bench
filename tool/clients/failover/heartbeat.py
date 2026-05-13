@@ -72,6 +72,14 @@ class HeartbeatClient:
         self.results: list[QueryResult] = []
         self.batch_size = 50  # flush to TimescaleDB every N results
 
+        # Auto test-run detection
+        self._auto_test_run = not bool(self.test_run_id)  # auto-detect if no explicit ID
+        self._in_failover = False
+        self._current_test_run_id = self.test_run_id
+        self._failover_start_ts = None
+        self._consecutive_successes = 0
+        self._failover_count = 0
+
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
@@ -154,6 +162,84 @@ class HeartbeatClient:
         except Exception as e:
             logger.warning(f"Failed to flush results to TimescaleDB: {e}")
 
+    def _handle_auto_test_run(self, result: QueryResult):
+        """Auto-detect failover boundaries and register test runs."""
+        if not self._auto_test_run:
+            return
+
+        if result.success:
+            self._consecutive_successes += 1
+
+            # Detect recovery: was in failover, now getting sustained success
+            if self._in_failover and self._consecutive_successes >= 3:
+                self._in_failover = False
+                logger.info(f"[auto-test-run] Failover recovered — test_run_id: {self._current_test_run_id}")
+
+                # Tag observer_events for the same window
+                try:
+                    with psycopg.connect(self.timescale_connstring, autocommit=True) as conn:
+                        with conn.cursor() as cur:
+                            end_ts = result.wall_ts.isoformat()
+                            start_ts = self._failover_start_ts.isoformat()
+                            cur.execute(
+                                "UPDATE observer_events SET test_run_id = %s "
+                                "WHERE ts BETWEEN %s::timestamptz AND %s::timestamptz "
+                                "AND (test_run_id IS NULL OR test_run_id = '')",
+                                [self._current_test_run_id, start_ts, end_ts],
+                            )
+                except Exception as e:
+                    logger.warning(f"[auto-test-run] Could not tag observer events: {e}")
+
+                # Log summary
+                try:
+                    with psycopg.connect(self.timescale_connstring, autocommit=True) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT downtime_ms, total_failures FROM failover_window "
+                                "WHERE test_run_id = %s",
+                                [self._current_test_run_id],
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                logger.info(f"[auto-test-run] Downtime: {row[0]:.0f}ms, Failed queries: {row[1]}")
+                except Exception as e:
+                    logger.warning(f"[auto-test-run] Could not query results: {e}")
+
+        else:
+            self._consecutive_successes = 0
+
+            # Detect failover start: first failure after stable period
+            if not self._in_failover:
+                self._in_failover = True
+                self._failover_count += 1
+                self._failover_start_ts = result.wall_ts
+
+                # Generate test_run_id
+                ts_str = result.wall_ts.strftime("%Y%m%d_%H%M%S")
+                self._current_test_run_id = f"{self.combination_id}_{ts_str}"
+                self.test_run_id = self._current_test_run_id
+
+                logger.info(f"[auto-test-run] Failover detected — registering test_run_id: {self._current_test_run_id}")
+
+                # Insert test_run record
+                try:
+                    with psycopg.connect(self.timescale_connstring, autocommit=True) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO test_runs (id, combination_id, dcs, provider, failover_type, started_at) "
+                                "VALUES (%s, %s, %s, %s, %s, %s)",
+                                [
+                                    self._current_test_run_id,
+                                    self.combination_id,
+                                    "consul",
+                                    "auto",
+                                    "unknown",
+                                    result.wall_ts,
+                                ],
+                            )
+                except Exception as e:
+                    logger.warning(f"[auto-test-run] Could not insert test_run: {e}")
+
     def run(self):
         """Main heartbeat loop."""
         logger.info(f"Starting heartbeat client")
@@ -169,6 +255,8 @@ class HeartbeatClient:
         while self.running:
             result = self._attempt_query()
             self.results.append(result)
+
+            self._handle_auto_test_run(result)
 
             if result.success:
                 success_count += 1

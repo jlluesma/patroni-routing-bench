@@ -32,29 +32,43 @@ vim .env    # fill in your Patroni node IPs, Consul URL, PG connection
 
 # 2. Start observers + TimescaleDB
 docker compose up -d
+# If your routing layer is HAProxy:
+# docker compose --profile haproxy up -d
 
-# 3. Verify observers are running
-docker compose logs observer-patroni | tail -5
-docker compose logs observer-consul | tail -5
+# 3. Verify observers are connecting
+docker compose logs observer-patroni | tail -5   # should show role_change events
+docker compose logs observer-consul | tail -5    # should show leader_key events
 
 # 4. Start the heartbeat client
 docker compose --profile failover up -d
 
-# 5. Watch the heartbeat (should show 100% success)
+# 5. Verify the heartbeat (should show 100% success)
 docker compose logs -f client-failover
+# Press Ctrl+C after seeing a few success lines
 
-# 6. Inject a failure on your cluster (in another terminal)
+# 6. Inject failure on your cluster (you control this)
 ssh admin@leader "sudo systemctl stop patroni"
 
-# 7. Watch recovery in the heartbeat output
+# 7. Watch recovery — the client auto-detects the failover
 docker compose logs -f client-failover
+# You'll see:
+#   [auto-test-run] Failover detected — registering test_run_id: my-cluster_20260513_221500
+#   [auto-test-run] Failover recovered — test_run_id: my-cluster_20260513_221500
+#   [auto-test-run] Downtime: 6322ms, Failed queries: 3
 
-# 8. After recovery — generate report
-docker compose --profile charts run --rm charts
+# 8. Check results
+docker exec prb-tsdb psql -U bench -c \
+  "SELECT test_run_id, downtime_ms, total_failures FROM failover_window;"
 
-# 9. View results
-ls results/
+# 9. Generate report
+docker compose --profile charts run --rm charts db-report --output /results/report.html
+
+# 10. View report
+open results/report.html    # macOS
+xdg-open results/report.html  # Linux
 ```
+
+The heartbeat client automatically detects failovers and registers test runs. Each failover gets a unique test_run_id. You can inject multiple failures — each one is tracked separately.
 
 ## Architecture
 
@@ -177,6 +191,51 @@ PG_CONNSTRING=host=primary.service.consul port=5432 dbname=postgres user=postgre
 ```
 
 The Consul observer captures when DNS would update (leader key change).
+
+## Troubleshooting
+
+### "relation failover_window does not exist"
+
+The views were not created on container startup. Fix:
+
+```bash
+docker cp tool/timescaledb/schema/003_create_views.sql prb-tsdb:/tmp/
+docker exec prb-tsdb psql -U bench -f /tmp/003_create_views.sql
+```
+
+### failover_window returns empty results
+
+No failover was detected yet. The heartbeat client auto-registers test runs when it detects the first query failure. Verify the client is running and connected:
+
+```bash
+docker compose logs client-failover | tail -10
+```
+
+### Observer shows "unreachable" or "Connection refused"
+
+Check network connectivity from the Docker host to your cluster:
+
+```bash
+curl http://YOUR_PATRONI_IP:8008/patroni
+curl http://YOUR_CONSUL_IP:8500/v1/status/leader
+```
+
+### Client shows "PG_CONNSTRING is required"
+
+The `.env` file is missing or not mounted. Verify:
+
+```bash
+cat .env | grep PG_CONNSTRING
+docker compose config | grep PG_CONNSTRING
+```
+
+### Charts: "connection refused" to TimescaleDB
+
+The charts container needs Docker networking to reach TimescaleDB. Run it via docker compose (not standalone docker run):
+
+```bash
+docker compose --profile charts run --rm charts db-report --output /results/report.html
+```
 
 ## Cleanup
 

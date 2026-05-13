@@ -44,31 +44,31 @@ Your machine (Docker)                Your cluster (untouched)
 ```bash
 cd tool/
 
-# 1. Configure your endpoints
+# 1. Configure — fill in your Patroni IPs, Consul URL, PG connection
 cp .env.example .env
-vim .env    # fill in your Patroni IPs, Consul URL, PG connection string
+vim .env
 
-# 2. Start observers + TimescaleDB
+# 2. Start observers + heartbeat client
 docker compose up -d
-
-# 3. Start the heartbeat client
 docker compose --profile failover up -d
 
-# 4. Inject failure on your cluster (manual — you control this)
+# 3. Inject failure (you control this)
 ssh admin@leader "sudo systemctl stop patroni"
 
-# 5. Watch recovery
+# 4. Watch recovery — failover is auto-detected and measured
 docker compose logs -f client-failover
+#   [auto-test-run] Downtime: 6322ms, Failed queries: 3
 
-# 6. Generate report
-docker compose --profile charts run --rm charts
+# 5. Generate report
+docker compose --profile charts run --rm charts db-report --output /results/report.html
+open results/report.html
 ```
+
+See [tool/README.md](tool/README.md) for full instructions, troubleshooting, and multi-test comparisons.
 
 The observers run on YOUR machine as Docker containers, connecting remotely to your Patroni REST API, Consul, and PostgreSQL. They capture timestamped events at every layer — DCS detection, PostgreSQL promotion, routing update, client recovery — and store them in a local TimescaleDB.
 
 Works with any routing layer: HAProxy, VIP (vip-manager, keepalived), Consul DNS, libpq multi-host, or any custom setup. If your routing layer is HAProxy, add the HAProxy observer: `docker compose --profile haproxy up -d`.
-
-See [`tool/README.md`](tool/README.md) for full documentation, including how to compare multiple routing layers and query raw event data.
 
 ---
 
