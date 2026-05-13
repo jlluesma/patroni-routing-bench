@@ -133,13 +133,6 @@
         flat: yes
       when: obs_action == "download-report"
 
-    - name: Download results CSV
-      fetch:
-        src: "{{ tool_dir }}/results/{{ batch_dir | default('latest') }}/results.csv"
-        dest: "{{ playbook_dir }}/../results/results.csv"
-        flat: yes
-      when: obs_action == "download-report"
-
     - name: Report downloaded
       debug:
         msg: "Report saved to deploy/gcp/results/"
