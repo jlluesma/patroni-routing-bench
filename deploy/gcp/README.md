@@ -63,10 +63,11 @@ docker compose --profile failover up -d
 cd deploy/gcp
 ./scripts/failover-test.sh --scenario hard_stop --target patroni-1
 
-# 6. Wait for recovery, then generate report
-ssh deploy@OBSERVER_IP
-cd /opt/patroni-routing-bench/tool
-docker compose --profile charts run --rm charts
+# 6. Generate and download the report
+cd deploy/gcp/ansible
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=generate-report
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=download-report
+# Report saved to deploy/gcp/results/batch_report.html
 
 # 7. Tear down everything
 cd deploy/gcp
@@ -156,6 +157,24 @@ ssh deploy@PATRONI_1_IP "sudo iptables -F INPUT && sudo iptables -F OUTPUT"
 # switchover
 ssh deploy@PATRONI_1_IP "patronictl -c /etc/patroni/patroni.yml switchover --master patroni-1 --force"
 ```
+
+## Reports
+
+```bash
+# Generate report on observer VM
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=generate-report
+
+# Download report and results CSV to your laptop (deploy/gcp/results/)
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=download-report
+
+# Specific batch directory (default: latest)
+ansible-playbook -i inventory/gcp.ini observer.yml \
+    -e obs_action=generate-report -e batch_dir=batch_20260429_220606
+```
+
+Reports are saved to `deploy/gcp/results/` on your laptop.
+
+---
 
 ## NTP Verification
 

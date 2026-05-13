@@ -1,0 +1,64 @@
+---
+# observer.yml — manage the tool stack and reports on the observer VM
+#
+# Required vars:
+#   obs_action   — generate-report | download-report
+#
+# Optional vars:
+#   batch_dir   — subdirectory under tool/results/ (default: latest)
+#
+# Examples:
+#   # Generate report on observer VM:
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=generate-report
+#
+#   # Download report to laptop (deploy/gcp/results/):
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=download-report
+#
+#   # Specific batch directory:
+#   ansible-playbook -i inventory/gcp.ini observer.yml \
+#       -e obs_action=generate-report -e batch_dir=batch_20260429_220606
+
+- name: Observer VM operations
+  hosts: observer
+  become: true
+  vars:
+    tool_dir: "{{ repo_dest }}/tool"
+
+  tasks:
+    - name: Generate batch report
+      shell: >
+        docker compose --profile charts run --rm charts
+        batch-report
+        --batch-csv /results/{{ batch_dir | default('latest') }}/results.csv
+        --batch-dir /results/{{ batch_dir | default('latest') }}
+        --output /results/{{ batch_dir | default('latest') }}/batch_report.html
+      args:
+        chdir: "{{ tool_dir }}"
+      when: obs_action == "generate-report"
+
+    - name: Create local results directory
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ playbook_dir }}/../results"
+        state: directory
+      when: obs_action == "download-report"
+
+    - name: Download batch report
+      fetch:
+        src: "{{ tool_dir }}/results/{{ batch_dir | default('latest') }}/batch_report.html"
+        dest: "{{ playbook_dir }}/../results/batch_report.html"
+        flat: yes
+      when: obs_action == "download-report"
+
+    - name: Download results CSV
+      fetch:
+        src: "{{ tool_dir }}/results/{{ batch_dir | default('latest') }}/results.csv"
+        dest: "{{ playbook_dir }}/../results/results.csv"
+        flat: yes
+      when: obs_action == "download-report"
+
+    - name: Report downloaded
+      debug:
+        msg: "Report saved to deploy/gcp/results/"
+      when: obs_action == "download-report"
