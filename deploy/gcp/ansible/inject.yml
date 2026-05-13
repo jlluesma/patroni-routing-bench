@@ -9,6 +9,8 @@
 #   recover            — true to run recovery instead of injection (default: false)
 #   partition_mode     — full | asymmetric (default: full)
 #   partition_block_ips — list of IPs for asymmetric partition
+#   combo_id           — combination_id for test_run record (default: 06-haproxy-rest-polling-gcp)
+#   post_wait          — seconds to wait after failover before tagging events (default: 15)
 #
 # Examples:
 #   # Auto-discover and stop the leader:
@@ -48,10 +50,97 @@
 
     - name: Show target
       debug:
-        msg: "Failover target: {{ resolved_target }} (scenario: {{ scenario | default('none') }}, recover: {{ recover | default(false) }})"
+        msg: "Failover target: {{ resolved_target }} (scenario: {{ scenario }}, recover: {{ recover | default(false) }})"
+
+- name: Register test run (pre-failover)
+  hosts: observer
+  become: true
+  gather_facts: false
+  vars:
+    tool_dir: /opt/patroni-routing-bench/tool
+    combination_id: "{{ combo_id | default('06-haproxy-rest-polling-gcp') }}"
+  tasks:
+    - name: Skip registration on recovery
+      meta: end_play
+      when: recover | default(false) | bool
+
+    - name: Generate test run ID
+      set_fact:
+        test_run_id: "{{ combination_id }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+        start_ts: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%S.%N+00:00') }}"
+
+    - name: Insert test_run record
+      shell: >
+        docker exec prb-tsdb psql -U bench -c
+        "INSERT INTO test_runs (id, combination_id, dcs, provider, failover_type, started_at)
+         VALUES ('{{ test_run_id }}', '{{ combination_id }}', 'consul', 'gcp', '{{ scenario }}', '{{ start_ts }}');"
+      args:
+        chdir: "{{ tool_dir }}"
+
+    - name: Store test run info for post-tasks
+      set_fact:
+        test_run_id: "{{ test_run_id }}"
+        start_ts: "{{ start_ts }}"
+
+    - name: Show test run ID
+      debug:
+        msg: "Test run: {{ test_run_id }}"
 
 - name: Inject failure scenario
   hosts: "{{ hostvars[groups['patroni'][0]]['resolved_target'] }}"
   become: true
   roles:
     - role: failure_injection
+
+- name: Tag events with test_run_id (post-failover)
+  hosts: observer
+  become: true
+  gather_facts: false
+  vars:
+    tool_dir: /opt/patroni-routing-bench/tool
+  tasks:
+    - name: Skip tagging on recovery
+      meta: end_play
+      when: recover | default(false) | bool
+
+    - name: Wait for failover to complete
+      pause:
+        seconds: "{{ post_wait | default(15) }}"
+
+    - name: Record end timestamp
+      set_fact:
+        end_ts: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%S.%N+00:00') }}"
+
+    - name: Tag observer events with test_run_id
+      shell: >
+        docker exec prb-tsdb psql -U bench -c
+        "UPDATE observer_events SET test_run_id = '{{ hostvars[groups['observer'][0]]['test_run_id'] }}'
+         WHERE ts BETWEEN '{{ hostvars[groups['observer'][0]]['start_ts'] }}'::timestamptz
+                       AND '{{ end_ts }}'::timestamptz
+           AND (test_run_id IS NULL OR test_run_id = '');"
+      args:
+        chdir: "{{ tool_dir }}"
+
+    - name: Tag client events with test_run_id
+      shell: >
+        docker exec prb-tsdb psql -U bench -c
+        "UPDATE client_events SET test_run_id = '{{ hostvars[groups['observer'][0]]['test_run_id'] }}'
+         WHERE ts BETWEEN '{{ hostvars[groups['observer'][0]]['start_ts'] }}'::timestamptz
+                       AND '{{ end_ts }}'::timestamptz
+           AND (test_run_id IS NULL OR test_run_id = '');"
+      args:
+        chdir: "{{ tool_dir }}"
+
+    - name: Show results
+      shell: >
+        docker exec prb-tsdb psql -U bench -c
+        "SELECT test_run_id, combination_id, first_failure, downtime_ms, total_failures
+         FROM failover_window
+         WHERE test_run_id = '{{ hostvars[groups['observer'][0]]['test_run_id'] }}';"
+      args:
+        chdir: "{{ tool_dir }}"
+      register: results
+
+    - name: Display results
+      debug:
+        msg: "{{ results.stdout_lines }}"
