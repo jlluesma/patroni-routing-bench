@@ -901,7 +901,7 @@ def _render_header(combination_id, session_date, patroni_cfg, runs_df, iteration
     ended_r = runs_df["ended_at"].dropna().max() if not runs_df.empty else None
     ended   = ended_r.strftime("%Y-%m-%d %H:%M:%S UTC") if ended_r is not None and not pd.isna(ended_r) else "—"
     return f"""\
-<h1>Failover Report — {_h(combination_id)}</h1>
+<h1>Failover Report — {_h(LAYER_LABELS.get(combination_id, combination_id))}</h1>
 <div class="meta"><div class="meta-grid">
   <span class="meta-label">Combination</span>   <span><code>{_h(combination_id)}</code></span>
   <span class="meta-label">Session date</span>  <span>{_h(str(session_date))}</span>
@@ -1098,7 +1098,7 @@ LAYER_LABELS   = {
     "09-patroni-callback-haproxy":    "Patroni callback → HAProxy",
     "10-consul-connect-envoy":        "Consul Connect / Envoy",
 }
-SCENARIO_ORDER = ["hard_stop", "hard_kill", "postgres_crash", "switchover", "pause"]
+SCENARIO_ORDER = ["hard_stop", "hard_kill", "network_partition", "postgres_crash", "switchover", "pause"]
 
 _BATCH_CSS = """\
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1178,10 +1178,17 @@ SELECT run_id,
 FROM milestones ORDER BY run_id
 """
 
-def _compute_waterfall(conn, combination_id: str) -> Optional[dict]:
+def _compute_waterfall(conn, combination_id: str, scenario: str = None) -> Optional[dict]:
     try:
         with conn.cursor() as cur:
-            cur.execute(_WATERFALL_SQL, [combination_id])
+            if scenario:
+                sql = _WATERFALL_SQL.replace(
+                    "WHERE tr.combination_id = %s",
+                    "WHERE tr.combination_id = %s AND tr.failover_type = %s",
+                )
+                cur.execute(sql, [combination_id, scenario])
+            else:
+                cur.execute(_WATERFALL_SQL, [combination_id])
             rows = cur.fetchall()
     except Exception as e:
         print(f"  [WARN] Waterfall query failed for {combination_id}: {e}", file=sys.stderr)
@@ -1299,6 +1306,97 @@ def _render_batch_family_charts(df: pd.DataFrame) -> str:
         html += "<h3>Overall Leaderboard</h3>" + _hbar("Overall leaderboard — all combinations", success, df)
     return html
 
+def _render_hero_chart(df: pd.DataFrame, conn) -> str:
+    """Stacked bar: server time vs client routing delay for hard_stop, all combos."""
+    points = []
+    for combo_id in sorted(df["combo_dir"].unique()):
+        medians = _compute_waterfall(conn, combo_id, "hard_stop")
+        if not medians:
+            continue
+        tc = medians.get("Tc")
+        if tc is None:
+            continue
+        t0 = medians.get("T0"); t1 = medians.get("T1")
+        t2 = medians.get("T2"); t3 = medians.get("T3")
+        server_vals = [v for v in [t0, t1, t2, t3] if v is not None]
+        server_done = max(server_vals) if server_vals else 0.0
+        client_delay = tc - server_done
+        if client_delay < 0:
+            server_done  = tc
+            client_delay = 0.0
+        points.append({
+            "combo_id":    combo_id,
+            "label":       LAYER_LABELS.get(combo_id, combo_id),
+            "server_done": server_done,
+            "client_delay": client_delay,
+            "tc":          tc,
+        })
+
+    if not points:
+        return "<p><em>No hard_stop data available for hero chart.</em></p>"
+
+    points.sort(key=lambda p: p["tc"])
+    labels       = [p["label"]        for p in points]
+    server_times = [p["server_done"]  for p in points]
+    client_times = [p["client_delay"] for p in points]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Server (DCS + election + promotion)",
+        y=labels, x=server_times, orientation="h",
+        marker_color="#e67e22",
+        text=[f"{v:.1f}s" for v in server_times],
+        textposition="inside", insidetextanchor="middle",
+        hovertemplate="%{y}: server %{x:.2f}s<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Client routing delay",
+        y=labels, x=client_times, orientation="h",
+        marker_color="#3498db",
+        text=[f"{v:.1f}s" if v > 0 else "—" for v in client_times],
+        textposition="inside", insidetextanchor="middle",
+        hovertemplate="%{y}: client delay %{x:.2f}s<extra></extra>",
+    ))
+    # Total annotation at the right end of each bar
+    for p, label in zip(points, labels):
+        fig.add_annotation(
+            x=p["tc"], y=label,
+            text=f"<b>{p['tc']:.1f}s</b>",
+            xanchor="left", yanchor="middle",
+            showarrow=False,
+            font=dict(size=12, color=DARK, family=FONT_FAMILY),
+            xshift=6,
+        )
+
+    height = max(400, len(points) * 50 + 120)
+    fig.update_layout(
+        title=dict(
+            text=("Server-side vs Client routing delay — hard_stop (median)<br>"
+                  "<sup><span style='color:#666;font-size:12px'>"
+                  "Server = DCS + election + promotion &nbsp;|&nbsp; "
+                  "Client = routing propagation to client</span></sup>"),
+            font=dict(size=17, family=FONT_FAMILY, color=DARK),
+        ),
+        font=dict(family=FONT_FAMILY, size=13, color=DARK),
+        plot_bgcolor=WHITE, paper_bgcolor=WHITE,
+        barmode="stack",
+        width=900, height=height,
+        margin=dict(l=220, r=100, t=80, b=60),
+        xaxis=dict(title="Time (s from first failure)", showgrid=True, gridcolor="#ecf0f1"),
+        yaxis=dict(showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1),
+    )
+
+    has_zero = any(p["client_delay"] == 0.0 for p in points)
+    footnote = (
+        "<p style='font-size:12px;color:#888;margin-top:8px'>"
+        "* Combos with zero client delay use client-side routing — the client reconnects "
+        "before all server events complete.</p>"
+        if has_zero else ""
+    )
+    return _plotly_html(fig) + footnote
+
+
 def _render_batch_waterfall(waterfall_data: dict) -> str:
     if not waterfall_data:
         return "<p><em>TimescaleDB not available or no data.</em></p>"
@@ -1365,7 +1463,23 @@ def _render_batch_waterfall(waterfall_data: dict) -> str:
         if t3 is not None:
             trows += f"<tr><td>Routing updated</td><td>{t3:.1f}s</td></tr>"
         trows += f"<tr><td><strong>Client recovered</strong></td><td><strong>{tc:.1f}s</strong></td></tr>"
-        html += (f"<h3>{_h(label)}</h3>" + _plotly_html(fig)
+        server_vals = [v for v in [t0, t1, t2, t3] if v is not None]
+        if server_vals:
+            server_done  = max(server_vals)
+            client_delay = tc - server_done
+            if client_delay < 0:
+                split_html = (f"<p style='font-size:13px;color:#555;margin:4px 0 8px'>"
+                              f"Server: {server_done:.1f}s &nbsp;|&nbsp; "
+                              f"Client recovered {abs(client_delay):.1f}s before server events "
+                              f"completed (client-side routing)</p>")
+            else:
+                client_pct = int(round(client_delay / tc * 100)) if tc > 0 else 0
+                split_html = (f"<p style='font-size:13px;color:#555;margin:4px 0 8px'>"
+                              f"Server: {server_done:.1f}s &nbsp;|&nbsp; "
+                              f"Client routing delay: {client_delay:.1f}s ({client_pct}% of total)</p>")
+        else:
+            split_html = ""
+        html += (f"<h3>{_h(label)}</h3>" + _plotly_html(fig) + split_html
                  + f"<table><thead><tr><th>Milestone</th><th>Offset from first failure</th></tr></thead>"
                  f"<tbody>{trows}</tbody></table>")
     return html
@@ -1394,6 +1508,352 @@ def _render_batch_summary_table(df: pd.DataFrame) -> str:
     return (f"<table><thead><tr><th>Combination ID</th><th>Description</th><th>Status</th>"
             f"<th>Median downtime</th><th>Median failed queries</th></tr></thead>"
             f"<tbody>\n{rows}</tbody></table>\n")
+
+def _categorize_error(error_text: str) -> str:
+    """Categorize a client error string into a human-readable type."""
+    if not error_text:
+        return "Unknown"
+    e = error_text.lower()
+    if "timeout" in e and "connect" in e:
+        return "Connect timeout"
+    if "timeout" in e:
+        return "Timeout"
+    if "connection refused" in e:
+        return "Connection refused"
+    if "resolve" in e or "name or service not known" in e:
+        return "DNS resolution failed"
+    if "shutting down" in e:
+        return "Server shutting down"
+    if "closed the connection unexpectedly" in e or "server closed" in e:
+        return "Connection closed by server"
+    if "read-write" in e or "target_session_attrs" in e:
+        return "Read-only (not primary)"
+    if "authentication" in e:
+        return "Authentication error"
+    return "Other"
+
+
+_LATENCY_TIMELINE_SQL = """
+WITH fw AS (
+    SELECT
+        MIN(ts) FILTER (WHERE NOT success)  AS first_failure,
+        MIN(ts) FILTER (WHERE success AND ts > (
+            SELECT MAX(ts) FROM client_events WHERE test_run_id = %s AND NOT success
+        ))                                   AS first_recovery
+    FROM client_events
+    WHERE test_run_id = %s
+)
+SELECT
+    EXTRACT(EPOCH FROM (ce.ts - fw.first_failure))::float         AS offset_s,
+    ce.success,
+    ce.latency_us / 1000.0                                        AS latency_ms,
+    ce.error,
+    EXTRACT(EPOCH FROM (fw.first_recovery - fw.first_failure))::float AS downtime_s
+FROM client_events ce, fw
+WHERE ce.test_run_id = %s
+  AND fw.first_failure IS NOT NULL
+  AND ce.ts >= fw.first_failure - INTERVAL '2 seconds'
+  AND ce.ts <= COALESCE(fw.first_recovery,
+                        fw.first_failure + INTERVAL '60 seconds') + INTERVAL '2 seconds'
+ORDER BY ce.ts
+"""
+
+
+def _render_client_failure_analysis(df: pd.DataFrame, conn) -> str:
+    """Per-combo error-type breakdown table across all failover scenarios."""
+    sections_html = ""
+
+    for combo_id in sorted(df["combo_dir"].unique()):
+        label = LAYER_LABELS.get(combo_id, combo_id)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ce.error, ce.latency_us "
+                    "FROM client_events ce "
+                    "JOIN test_runs tr ON tr.id = ce.test_run_id "
+                    "WHERE tr.combination_id = %s AND ce.success = false",
+                    [combo_id],
+                )
+                rows = cur.fetchall()
+        except Exception as e:
+            print(f"  [WARN] Client failure query failed for {combo_id}: {e}", file=sys.stderr)
+            continue
+
+        if not rows:
+            continue
+
+        cat_data: dict = collections.defaultdict(lambda: {"count": 0, "latencies": []})
+        for error_text, latency_us in rows:
+            cat = _categorize_error(error_text)
+            cat_data[cat]["count"] += 1
+            if latency_us is not None:
+                cat_data[cat]["latencies"].append(float(latency_us))
+
+        total_failures = sum(d["count"] for d in cat_data.values())
+        table_rows = ""
+        for cat, data in sorted(cat_data.items(), key=lambda x: -x[1]["count"]):
+            count     = data["count"]
+            pct       = int(round(count / total_failures * 100)) if total_failures else 0
+            latencies = data["latencies"]
+            if latencies:
+                avg_us    = statistics.mean(latencies)
+                max_us    = max(latencies)
+                impact_s  = count * avg_us / 1_000_000
+                avg_str   = (f"{avg_us/1_000_000:.2f}s" if avg_us >= 1_000_000
+                             else f"{avg_us/1000:.0f}ms")
+                max_str   = (f"{max_us/1_000_000:.2f}s" if max_us >= 1_000_000
+                             else f"{max_us/1000:.0f}ms")
+                impact_str = (f"{impact_s:.1f}s total wait" if impact_s >= 0.1
+                              else f"{impact_s*1000:.0f}ms total wait")
+            else:
+                avg_us = 0
+                avg_str = max_str = impact_str = "—"
+
+            highlight    = ' style="background:#fef9e7"' if avg_us > 1_000_000 else ""
+            impact_style = ' style="color:#e74c3c;font-weight:bold"' if avg_us > 1_000_000 else ""
+            table_rows += (
+                f"<tr{highlight}>"
+                f"<td>{_h(cat)}</td>"
+                f"<td>{count}</td>"
+                f"<td>{pct}%</td>"
+                f"<td>{avg_str}</td>"
+                f"<td>{max_str}</td>"
+                f"<td{impact_style}>{_h(impact_str)}</td>"
+                f"</tr>\n"
+            )
+
+        sections_html += (
+            f"<h3>{_h(label)}</h3>\n"
+            "<table><thead><tr>"
+            "<th>Error Type</th><th>Count</th><th>% of Failures</th>"
+            "<th>Avg Latency</th><th>Max Latency</th><th>Impact</th>"
+            "</tr></thead>"
+            f"<tbody>\n{table_rows}</tbody></table>\n"
+        )
+
+    return sections_html or "<p><em>No client failure data available.</em></p>"
+
+
+def _render_client_latency_timeline(df: pd.DataFrame, conn) -> str:
+    """Per-combo scatter plot of client latency during a representative hard_stop failover."""
+    sections_html = ""
+
+    for combo_id in sorted(df["combo_dir"].unique()):
+        label = LAYER_LABELS.get(combo_id, combo_id)
+
+        hs = df[(df["combo_dir"] == combo_id) & (df["scenario"] == "hard_stop")].copy()
+        hs["downtime_s"] = _to_numeric(hs["downtime_s"])
+        hs = hs.dropna(subset=["downtime_s"]).reset_index(drop=True)
+        if hs.empty:
+            continue
+        median_dt   = hs["downtime_s"].median()
+        closest_idx = int((hs["downtime_s"] - median_dt).abs().idxmin())
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM test_runs "
+                    "WHERE combination_id = %s AND failover_type = 'hard_stop' "
+                    "ORDER BY started_at",
+                    [combo_id],
+                )
+                run_ids = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            print(f"  [WARN] Run ID query failed for {combo_id}: {e}", file=sys.stderr)
+            continue
+
+        if closest_idx >= len(run_ids):
+            continue
+        test_run_id = run_ids[closest_idx]
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_LATENCY_TIMELINE_SQL,
+                            [test_run_id, test_run_id, test_run_id])
+                tl_rows = cur.fetchall()
+        except Exception as e:
+            print(f"  [WARN] Latency timeline query failed for {combo_id}: {e}", file=sys.stderr)
+            continue
+
+        if not tl_rows:
+            continue
+
+        offsets    = [r[0] for r in tl_rows]
+        successes  = [r[1] for r in tl_rows]
+        latencies  = [max(float(r[2]), 0.01) for r in tl_rows]
+        downtime_s = tl_rows[0][4]
+
+        ok_x   = [o for o, s in zip(offsets, successes) if s]
+        ok_y   = [l for l, s in zip(latencies, successes) if s]
+        fail_x = [o for o, s in zip(offsets, successes) if not s]
+        fail_y = [l for l, s in zip(latencies, successes) if not s]
+        fail_sz = [12 if lat > 1000 else 5 for lat in fail_y]
+
+        fig = go.Figure()
+        if ok_x:
+            fig.add_trace(go.Scatter(
+                x=ok_x, y=ok_y, mode="markers",
+                marker=dict(color="#2ecc71", size=4),
+                name="Success",
+                hovertemplate="offset: %{x:.2f}s<br>latency: %{y:.1f}ms<extra></extra>",
+            ))
+        if fail_x:
+            fig.add_trace(go.Scatter(
+                x=fail_x, y=fail_y, mode="markers",
+                marker=dict(color="#e74c3c", size=fail_sz),
+                name="Failed",
+                hovertemplate="offset: %{x:.2f}s<br>latency: %{y:.1f}ms<extra></extra>",
+            ))
+        fig.add_vline(x=0, line=dict(color="#e74c3c", dash="dash", width=1.5),
+                      annotation_text="failure", annotation_position="top right")
+        if downtime_s is not None:
+            fig.add_vline(x=float(downtime_s),
+                          line=dict(color="#2ecc71", dash="dash", width=1.5),
+                          annotation_text="recovery", annotation_position="top left")
+        fig.update_layout(
+            title=dict(text=_h(label), font=dict(size=14, family=FONT_FAMILY, color=DARK)),
+            font=dict(family=FONT_FAMILY, size=12, color=DARK),
+            plot_bgcolor=WHITE, paper_bgcolor=WHITE,
+            width=800, height=300,
+            margin=dict(l=70, r=40, t=50, b=50),
+            xaxis=dict(title="Seconds from first failure",
+                       showgrid=True, gridcolor="#ecf0f1"),
+            yaxis=dict(title="Latency (ms)", type="log",
+                       showgrid=True, gridcolor="#ecf0f1"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        sections_html += f"<h3>{_h(label)}</h3>\n" + _plotly_html(fig) + "\n"
+
+    return sections_html or "<p><em>No client latency data available.</em></p>"
+
+
+def _render_per_iteration_table(df: pd.DataFrame, conn) -> str:
+    """Per-iteration detail: one table per combination, with server-side milestone offsets."""
+    sections_html = ""
+
+    for combo_id in sorted(df["combo_dir"].unique()):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_WATERFALL_SQL, [combo_id])
+                sql_rows = cur.fetchall()
+        except Exception as e:
+            print(f"  [WARN] Per-iteration query failed for {combo_id}: {e}", file=sys.stderr)
+            sql_rows = []
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, failover_type, started_at FROM test_runs "
+                    "WHERE combination_id = %s ORDER BY started_at",
+                    [combo_id],
+                )
+                meta_rows = cur.fetchall()
+        except Exception:
+            meta_rows = []
+
+        milestone_by_rid = {
+            row[0]: {"T0": row[1], "T1": row[2], "T2": row[3],
+                     "T3": row[4], "T4": row[5], "Tc": row[6]}
+            for row in sql_rows
+        }
+        meta_by_rid = {r[0]: (r[1], r[2]) for r in meta_rows}
+
+        runs_by_scenario: dict = collections.defaultdict(list)
+        for rid, (ftype, started) in sorted(meta_by_rid.items(),
+                                             key=lambda x: x[1][1] or ""):
+            runs_by_scenario[ftype or "unknown"].append(rid)
+
+        label   = LAYER_LABELS.get(combo_id, combo_id)
+        csv_sub = df[df["combo_dir"] == combo_id]
+        combo_rows = ""
+        scenario_counter: dict = collections.defaultdict(int)
+
+        for _, csv_row in csv_sub.iterrows():
+            scenario = csv_row.get("scenario", "unknown")
+            iter_num = csv_row.get("iteration", "—")
+            leader   = csv_row.get("leader_killed", "—")
+            dt_s     = csv_row.get("downtime_s", "—")
+            fq       = csv_row.get("failed_queries", "—")
+            status   = csv_row.get("status", "—")
+
+            scenario_runs = runs_by_scenario.get(scenario, [])
+            per_scenario_idx = scenario_counter[scenario]
+            scenario_counter[scenario] += 1
+            try:
+                run_id = scenario_runs[per_scenario_idx]
+            except (TypeError, ValueError, IndexError):
+                run_id = None
+
+            ms = milestone_by_rid.get(run_id, {}) if run_id else {}
+            t0 = ms.get("T0"); t1 = ms.get("T1"); t2 = ms.get("T2")
+            t3 = ms.get("T3"); tc = ms.get("Tc")
+
+            def _fmt(v): return f"{v:.1f}s" if v is not None else "—"
+
+            server_vals = [v for v in [t0, t1, t2, t3] if v is not None]
+            server_done = max(server_vals) if server_vals else None
+            if server_done is not None and tc is not None:
+                client_delay = tc - server_done
+                if client_delay < 0:
+                    client_delay = 0.0
+                sd_str = f"{server_done:.1f}s"
+                cd_str = f"{client_delay:.1f}s"
+            else:
+                client_delay = None
+                sd_str = cd_str = "—"
+
+            try:
+                dt_str = f"{float(dt_s):.1f}s"
+            except (TypeError, ValueError):
+                dt_str = "—"
+
+            highlight = ""
+            if server_done is not None and server_done > 0 and client_delay is not None:
+                if client_delay > 3 * server_done:
+                    highlight = ' style="background:#fef9e7"'
+
+            sc_badge = "pass" if status == "SUCCESS" else "fail"
+            combo_rows += (
+                f"<tr{highlight}>"
+                f"<td><code>{_h(str(scenario))}</code></td>"
+                f"<td>{_h(str(iter_num))}</td>"
+                f"<td>{_h(str(leader))}</td>"
+                f"<td class='{sc_badge}'>{dt_str}</td>"
+                f"<td>{_h(str(fq))}</td>"
+                f"<td>{_fmt(t2)}</td>"
+                f"<td>{_fmt(t0)}</td>"
+                f"<td>{_fmt(t1)}</td>"
+                f"<td>{_fmt(t3)}</td>"
+                f"<td>{_fmt(tc)}</td>"
+                f"<td>{sd_str}</td>"
+                f"<td>{cd_str}</td>"
+                f"</tr>\n"
+            )
+
+        if combo_rows:
+            sections_html += (
+                f"<h3>{_h(label)}</h3>\n"
+                "<table><thead><tr>"
+                "<th>Scenario</th><th>Iter</th><th>Node Killed</th>"
+                "<th>Downtime</th><th>Failed Queries</th>"
+                "<th>DCS (T2)</th><th>Promote (T0)</th><th>Patroni (T1)</th>"
+                "<th>HAProxy (T3)</th><th>Client (Tc)</th>"
+                "<th>Server Done</th><th>Client Delay</th>"
+                "</tr></thead>"
+                f"<tbody>\n{combo_rows}</tbody></table>\n"
+            )
+
+    if not sections_html:
+        return "<p><em>No iteration data available.</em></p>"
+
+    return (
+        "<p>All individual iterations with server-side milestone offsets (seconds from first "
+        "client failure). \"Server Done\" is the last server-side routing event (max of T0–T3); "
+        "\"Client Delay\" is additional time for the change to reach the client. "
+        "Rows highlighted in yellow have Client Delay &gt; 3× Server Done.</p>\n"
+        + sections_html
+    )
+
 
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 def cmd_iteration(args):
@@ -1505,7 +1965,7 @@ def cmd_combo_report(args):
     doc = (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
         "<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-        f"<title>Failover Report — {_h(combination_id)} — {_h(str(session_date))}</title>\n"
+        f"<title>Failover Report — {_h(LAYER_LABELS.get(combination_id, combination_id))} — {_h(str(session_date))}</title>\n"
         f"<style>{_CSS}</style>\n</head>\n<body>\n"
         + _render_header(combination_id, session_date, patroni_cfg, runs_df, iterations)
         + _render_summary_table(iterations)
@@ -1540,14 +2000,16 @@ def cmd_batch_report(args):
         print(f"[WARN] TimescaleDB unavailable: {e} — waterfall skipped", file=sys.stderr)
 
     waterfall_data: dict = {}
+    hero_html = ""
     if conn:
         for combo_id in sorted(df["combo_dir"].unique()):
-            medians = _compute_waterfall(conn, combo_id)
+            medians = _compute_waterfall(conn, combo_id, scenario="hard_stop")
             if medians:
                 waterfall_data[combo_id] = medians
                 print(f"  {combo_id}: ok")
             else:
                 print(f"  {combo_id}: no data")
+        hero_html = _render_hero_chart(df, conn)
         conn.close()
 
     link_html = '<div class="combo-links">'
@@ -1562,6 +2024,16 @@ def cmd_batch_report(args):
                           f'background:#ccc;border-radius:4px;font-size:12px">'
                           f'{_h(row["combo_dir"])}</span>')
     link_html += "</div>"
+
+    env_line = (
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"PostgreSQL 18 &nbsp;|&nbsp; Patroni 4.x &nbsp;|&nbsp; Consul &nbsp;|&nbsp; "
+        f"3 nodes &nbsp;|&nbsp; {len(df['scenario'].unique())} scenarios &nbsp;|&nbsp; "
+        f"{int(df.groupby(['combo_dir','scenario']).size().median())} iterations/scenario "
+        f"&nbsp;|&nbsp; Client heartbeat: 100ms &nbsp;|&nbsp; Observer poll: 100ms "
+        f"&nbsp;|&nbsp; Downtime = first failure → first success after last failure"
+        f"</p>\n"
+    )
 
     html = (f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
             f"<meta charset=\"UTF-8\">"
@@ -1578,26 +2050,170 @@ def cmd_batch_report(args):
             f"<div class=\"meta-item\"><label>Scenarios</label><span>{', '.join(sorted(df['scenario'].unique()))}</span></div>"
             f"<div class=\"meta-item\"><label>Git revision</label><span>{_git_rev()}</span></div>"
             f"</div>\n"
-            f"<h2>1. Results Summary</h2>\n{_render_batch_summary_table(df)}\n"
+            f"<h2>1. Results Summary</h2>\n{env_line}{_render_batch_summary_table(df)}\n"
             f"<h2>2. Downtime Heatmap — Combination × Scenario</h2>\n{_render_batch_heatmap(df)}\n"
             f"<h2>3. Per-Scenario Comparison</h2>\n{_render_batch_scenario_bars(df)}\n"
             f"<h2>4. Routing Layer Families</h2>\n{_render_batch_family_charts(df)}\n"
-            f"<h2>5. Failover Waterfall Timings</h2>\n{_render_batch_waterfall(waterfall_data)}\n"
-            f"<h2>6. Methodology &amp; Environment</h2>\n"
-            f"<table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>\n"
-            f"<tr><td>Batch CSV</td><td>{_h(str(csv_path))}</td></tr>\n"
-            f"<tr><td>Generated</td><td>{generated}</td></tr>\n"
-            f"<tr><td>Git revision</td><td>{_git_rev()}</td></tr>\n"
-            f"<tr><td>Docker version</td><td>{_docker_version()}</td></tr>\n"
-            f"<tr><td>Downtime measurement</td><td>First client failure → first success after last failure</td></tr>\n"
-            f"<tr><td>Waterfall T0</td><td>postgres pg_promote_requested</td></tr>\n"
-            f"<tr><td>Waterfall Tc</td><td>First client success after last failure</td></tr>\n"
-            f"</tbody></table>\n"
-            f"</div>\n<footer>patroni-routing-bench &mdash; batch report</footer>\n</body>\n</html>\n")
+            f"<h2>5. Server vs Client — Where Is the Time Spent?</h2>\n{hero_html}\n"
+            f"<h2>6. Failover Waterfall Timings</h2>\n"
+            f"<p style='font-size:13px;color:#555;margin-bottom:12px'>Milestone offsets are medians across hard_stop iterations for each combination.</p>\n"
+            f"{_render_batch_waterfall(waterfall_data)}\n"
+            f"</div>\n<footer>patroni-routing-bench &mdash; {generated} &mdash; {_git_rev()}</footer>\n</body>\n</html>\n")
+
+    if conn is not None:
+        try:
+            conn2 = get_connection()
+            iter_html     = _render_per_iteration_table(df, conn2)
+            failure_html  = _render_client_failure_analysis(df, conn2)
+            timeline_html = _render_client_latency_timeline(df, conn2)
+            conn2.close()
+        except Exception as e:
+            iter_html     = f"<p><em>Per-iteration detail unavailable: {e}</em></p>"
+            failure_html  = f"<p><em>Client failure analysis unavailable: {e}</em></p>"
+            timeline_html = f"<p><em>Client latency timeline unavailable: {e}</em></p>"
+    else:
+        iter_html     = "<p><em>Per-iteration detail requires TimescaleDB connection.</em></p>"
+        failure_html  = "<p><em>Client failure analysis requires TimescaleDB connection.</em></p>"
+        timeline_html = "<p><em>Client latency timeline requires TimescaleDB connection.</em></p>"
+    html = html.replace(
+        "</div>\n<footer>patroni-routing-bench",
+        f"<h2>7. Per-Iteration Detail</h2>\n{iter_html}\n"
+        f"<h2>8. Client Failure Analysis</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Error type breakdown during failover. \"Connect timeout\" errors indicate the "
+        f"client's TCP connection was accepted but not routed — the client waited the full "
+        f"connect_timeout (5s) before retrying. \"Connection refused\" and "
+        f"\"DNS resolution failed\" are instant failures (~2-7ms).</p>\n"
+        f"{failure_html}\n"
+        f"<h2>9. Client Latency Timeline</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Per-query latency during a representative hard_stop failover for each combination. "
+        f"Red dots are failed queries, green dots are successful. The red dashed line marks "
+        f"first failure; the green dashed line marks recovery. Y-axis is log scale — tall "
+        f"red dots are connect timeout hangs (5s), short red dots are instant failures (2-7ms).</p>\n"
+        f"{timeline_html}\n"
+        f"</div>\n<footer>patroni-routing-bench",
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
     print(f"Batch report saved: {out_path}")
+
+
+def cmd_db_report(args):
+    """Generate batch report directly from TimescaleDB — no CSV needed."""
+    out_path = Path(args.output)
+    combo_filter = args.combination_id
+
+    conn = get_connection()
+    print("Connected to TimescaleDB")
+
+    query = """
+        SELECT
+            tr.id AS test_run_id,
+            tr.combination_id AS combo_dir,
+            tr.failover_type AS scenario,
+            tr.started_at,
+            fw.downtime_ms / 1000.0 AS downtime_s,
+            fw.total_failures AS failed_queries,
+            'SUCCESS' AS status
+        FROM test_runs tr
+        JOIN failover_window fw ON fw.test_run_id = tr.id
+    """
+    if combo_filter:
+        query += f" WHERE tr.combination_id = '{combo_filter}'"
+    query += " ORDER BY tr.combination_id, tr.failover_type, tr.started_at"
+
+    with conn.cursor() as cur:
+        cur.execute(query)
+        columns = [desc[0] for desc in cur.description]
+        rows = cur.fetchall()
+
+    if not rows:
+        sys.exit("ERROR: no test run data found in TimescaleDB. Run some failover tests first.")
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["downtime_s"] = pd.to_numeric(df["downtime_s"], errors="coerce")
+    df["failed_queries"] = pd.to_numeric(df["failed_queries"], errors="coerce").fillna(0).astype(int)
+    df["iteration"] = df.groupby(["combo_dir", "scenario"]).cumcount() + 1
+    df["prefix"] = "gcp"
+    df["leader_killed"] = ""
+    df["session_folder"] = ""
+
+    print(f"Found {len(df)} test runs across {df['combo_dir'].nunique()} combinations")
+    for combo in sorted(df["combo_dir"].unique()):
+        n = len(df[df["combo_dir"] == combo])
+        print(f"  {combo}: {n} runs")
+
+    generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    waterfall_data: dict = {}
+    for combo_id in sorted(df["combo_dir"].unique()):
+        medians = _compute_waterfall(conn, combo_id, scenario="hard_stop")
+        if medians:
+            waterfall_data[combo_id] = medians
+            print(f"  {combo_id}: waterfall ok")
+        else:
+            print(f"  {combo_id}: no waterfall data")
+
+    hero_html = _render_hero_chart(df, conn)
+
+    conn2 = get_connection()
+    iter_html     = _render_per_iteration_table(df, conn2)
+    failure_html  = _render_client_failure_analysis(df, conn2)
+    timeline_html = _render_client_latency_timeline(df, conn2)
+    conn2.close()
+
+    env_line = (
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"GCP Compute Engine &nbsp;|&nbsp; "
+        f"{df['combo_dir'].nunique()} combinations &nbsp;|&nbsp; "
+        f"{len(df['scenario'].unique())} scenarios &nbsp;|&nbsp; "
+        f"{len(df)} total runs"
+        f"</p>\n"
+    )
+
+    html = (
+        f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+        f"<meta charset=\"UTF-8\">"
+        f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+        f"<title>patroni-routing-bench — GCP Report</title>\n"
+        f"<style>{_BATCH_CSS}</style>\n</head>\n<body>\n"
+        f"<header><h1>Patroni Routing Benchmark — GCP Report</h1>"
+        f"<p>Generated {generated}</p></header>\n"
+        f"<div class='container'>\n"
+        f"<h2>1. Results Summary</h2>\n{env_line}{_render_batch_summary_table(df)}\n"
+        f"<h2>2. Downtime Heatmap — Combination × Scenario</h2>\n{_render_batch_heatmap(df)}\n"
+        f"<h2>3. Per-Scenario Comparison</h2>\n{_render_batch_scenario_bars(df)}\n"
+        f"<h2>4. Routing Layer Families</h2>\n{_render_batch_family_charts(df)}\n"
+        f"<h2>5. Server vs Client — Where Is the Time Spent?</h2>\n{hero_html}\n"
+        f"<h2>6. Failover Waterfall Timings</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>Milestone offsets are medians across hard_stop iterations for each combination.</p>\n"
+        f"{_render_batch_waterfall(waterfall_data)}\n"
+        f"<h2>7. Per-Iteration Detail</h2>\n{iter_html}\n"
+        f"<h2>8. Client Failure Analysis</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Error type breakdown during failover. \"Connect timeout\" errors indicate the "
+        f"client's TCP connection was accepted but not routed — the client waited the full "
+        f"connect_timeout (5s) before retrying. \"Connection refused\" and "
+        f"\"DNS resolution failed\" are instant failures (~2-7ms).</p>\n"
+        f"{failure_html}\n"
+        f"<h2>9. Client Latency Timeline</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Per-query latency during a representative hard_stop failover for each combination. "
+        f"Red dots are failed queries, green dots are successful. The red dashed line marks "
+        f"first failure; the green dashed line marks recovery. Y-axis is log scale — tall "
+        f"red dots are connect timeout hangs (5s), short red dots are instant failures (2-7ms).</p>\n"
+        f"{timeline_html}\n"
+        f"</div>\n"
+        f"<footer>patroni-routing-bench — GCP — {generated}</footer>\n"
+        f"</body>\n</html>\n"
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    print(f"Report saved: {out_path}")
+    conn.close()
 
 
 def cmd_legacy(args):
@@ -1710,6 +2326,12 @@ def main():
     p_batch.add_argument("--batch-dir",  required=True, help="Batch results directory (for context)")
     p_batch.add_argument("--output",     required=True, help="Output HTML file path")
 
+    p_db = subs.add_parser("db-report",
+                            help="Generate report from TimescaleDB data (no CSV needed)")
+    p_db.add_argument("--output", required=True, help="Output HTML file path")
+    p_db.add_argument("--combination-id", default=None,
+                      help="Filter to a specific combination_id (default: all)")
+
     args = parser.parse_args()
 
     if args.subcommand == "iteration":
@@ -1718,6 +2340,8 @@ def main():
         cmd_combo_report(args)
     elif args.subcommand == "batch-report":
         cmd_batch_report(args)
+    elif args.subcommand == "db-report":
+        cmd_db_report(args)
     else:
         if not args.test_run_id and not args.combination_id and not args.compare:
             parser.print_help()
