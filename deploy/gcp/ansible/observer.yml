@@ -33,6 +33,16 @@
   tasks:
     # --- Stack lifecycle ---
 
+    - name: Copy .env.gcp to .env
+      copy:
+        src: "{{ tool_dir }}/.env.gcp"
+        dest: "{{ tool_dir }}/.env"
+        remote_src: true
+        owner: deploy
+        group: deploy
+        mode: "0640"
+      when: obs_action == "start"
+
     - name: Start observer stack
       shell: docker compose up -d
       args:
@@ -64,8 +74,7 @@
       when: obs_action == "logs"
 
     - name: Run SQL query against TimescaleDB
-      shell: >
-        docker exec prb-timescaledb psql -U bench -c "{{ sql }}"
+      shell: "docker exec prb-tsdb psql -U bench -c '{{ sql }}'"
       register: query_result
       when: obs_action == "query"
 
@@ -77,9 +86,7 @@
     # --- Data management ---
 
     - name: Truncate event tables (clean slate before next batch)
-      shell: >
-        docker exec prb-timescaledb psql -U bench -c
-        "TRUNCATE observer_events, client_events, test_runs CASCADE;"
+      shell: "docker exec prb-tsdb psql -U bench -c 'TRUNCATE observer_events, client_events, test_runs CASCADE;'"
       when: obs_action == "truncate"
 
     # --- Report generation ---
