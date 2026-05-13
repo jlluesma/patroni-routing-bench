@@ -1,4 +1,10 @@
 ---
+- name: Add deploy user to postgres group
+  user:
+    name: deploy
+    groups: postgres
+    append: yes
+
 - name: Create /etc/patroni directory
   file:
     path: /etc/patroni

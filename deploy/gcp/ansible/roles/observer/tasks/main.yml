@@ -35,6 +35,12 @@
     state: started
     enabled: true
 
+- name: Add deploy user to docker group
+  user:
+    name: deploy
+    groups: docker
+    append: yes
+
 - name: Install git
   apt:
     name: git
@@ -58,3 +64,10 @@
     path: "{{ repo_dest }}/tool/results"
     state: directory
     mode: "0755"
+
+- name: Set repo ownership to deploy user
+  file:
+    path: "{{ repo_dest }}"
+    owner: deploy
+    group: deploy
+    recurse: yes

@@ -21,6 +21,3 @@
   become: true
   roles:
     - role: failure_injection
-      vars:
-        scenario: "{{ scenario | default('') }}"
-        recover: "{{ recover | default(false) }}"
