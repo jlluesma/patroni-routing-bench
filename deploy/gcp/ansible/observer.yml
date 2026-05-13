@@ -2,19 +2,25 @@
 # observer.yml — manage the tool stack and reports on the observer VM
 #
 # Required vars:
-#   obs_action   — generate-report | download-report
+#   obs_action — start | start-client | stop | query | logs | truncate |
+#                generate-report | download-report
 #
 # Optional vars:
 #   batch_dir   — subdirectory under tool/results/ (default: latest)
+#   sql         — SQL query string (required for obs_action=query)
+#   container   — container name (required for obs_action=logs)
 #
 # Examples:
-#   # Generate report on observer VM:
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=start
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=start-client
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=stop
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=truncate
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=query \
+#       -e "sql=SELECT * FROM failover_window ORDER BY first_failure DESC LIMIT 5;"
+#   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=logs \
+#       -e container=prb-obs-patroni
 #   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=generate-report
-#
-#   # Download report to laptop (deploy/gcp/results/):
 #   ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=download-report
-#
-#   # Specific batch directory:
 #   ansible-playbook -i inventory/gcp.ini observer.yml \
 #       -e obs_action=generate-report -e batch_dir=batch_20260429_220606
 
@@ -25,6 +31,59 @@
     tool_dir: "{{ repo_dest }}/tool"
 
   tasks:
+    # --- Stack lifecycle ---
+
+    - name: Start observer stack
+      shell: docker compose up -d
+      args:
+        chdir: "{{ tool_dir }}"
+      when: obs_action == "start"
+
+    - name: Start heartbeat client
+      shell: docker compose --profile failover up -d
+      args:
+        chdir: "{{ tool_dir }}"
+      when: obs_action == "start-client"
+
+    - name: Stop observer stack
+      shell: docker compose --profile failover --profile haproxy down
+      args:
+        chdir: "{{ tool_dir }}"
+      when: obs_action == "stop"
+
+    # --- Observability ---
+
+    - name: Show container logs
+      shell: "docker logs {{ container }} --tail 50"
+      register: log_output
+      when: obs_action == "logs"
+
+    - name: Display container logs
+      debug:
+        msg: "{{ log_output.stdout_lines }}"
+      when: obs_action == "logs"
+
+    - name: Run SQL query against TimescaleDB
+      shell: >
+        docker exec prb-timescaledb psql -U bench -c "{{ sql }}"
+      register: query_result
+      when: obs_action == "query"
+
+    - name: Show query result
+      debug:
+        msg: "{{ query_result.stdout_lines }}"
+      when: obs_action == "query"
+
+    # --- Data management ---
+
+    - name: Truncate event tables (clean slate before next batch)
+      shell: >
+        docker exec prb-timescaledb psql -U bench -c
+        "TRUNCATE observer_events, client_events, test_runs CASCADE;"
+      when: obs_action == "truncate"
+
+    # --- Report generation ---
+
     - name: Generate batch report
       shell: >
         docker compose --profile charts run --rm charts
@@ -35,6 +94,8 @@
       args:
         chdir: "{{ tool_dir }}"
       when: obs_action == "generate-report"
+
+    # --- Report download ---
 
     - name: Create local results directory
       delegate_to: localhost
