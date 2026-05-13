@@ -1,23 +1,57 @@
 ---
-# inject.yml — inject or recover from a failure scenario on a target node
+# inject.yml — inject or recover from a failure scenario
 #
 # Required vars:
 #   scenario   — hard_stop | hard_kill | switchover | network_partition | postgres_crash
-#   target     — inventory hostname (default: patroni-1)
 #
 # Optional vars:
+#   target             — patroni-1|patroni-2|patroni-3|leader (default: leader)
 #   recover            — true to run recovery instead of injection (default: false)
 #   partition_mode     — full | asymmetric (default: full)
 #   partition_block_ips — list of IPs for asymmetric partition
 #
 # Examples:
-#   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e target=patroni-1
+#   # Auto-discover and stop the leader:
+#   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop
+#
+#   # Target a specific node:
+#   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e target=patroni-2
+#
+#   # Recovery (always specify the node explicitly):
 #   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e recover=true -e target=patroni-1
+#
+#   # Network partition with asymmetric mode:
 #   ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=network_partition \
 #       -e partition_mode=asymmetric -e '{"partition_block_ips":["10.0.1.20"]}' -e target=patroni-1
 
+- name: Discover leader
+  hosts: patroni[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Skip discovery if explicit target given
+      set_fact:
+        resolved_target: "{{ target }}"
+      when: target is defined and target != 'leader'
+
+    - name: Get cluster state from Patroni REST API
+      uri:
+        url: "http://localhost:8008/cluster"
+        return_content: yes
+      register: cluster_state
+      when: target is not defined or target == 'leader'
+
+    - name: Extract leader hostname
+      set_fact:
+        resolved_target: "{{ (cluster_state.json.members | selectattr('role', 'equalto', 'leader') | first).name }}"
+      when: target is not defined or target == 'leader'
+
+    - name: Show target
+      debug:
+        msg: "Failover target: {{ resolved_target }} (scenario: {{ scenario | default('none') }}, recover: {{ recover | default(false) }})"
+
 - name: Inject failure scenario
-  hosts: "{{ target | default('patroni-1') }}"
+  hosts: "{{ hostvars[groups['patroni'][0]]['resolved_target'] }}"
   become: true
   roles:
     - role: failure_injection
