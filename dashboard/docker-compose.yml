@@ -90,7 +90,7 @@ services:
   # Usage: docker compose --profile charts run charts --combination-id 06-haproxy-rest-polling
   # =========================================================================
   charts:
-    build: ./charts
+    build: ../tool/charts
     container_name: prb-charts
     profiles: ["charts"]
     environment:

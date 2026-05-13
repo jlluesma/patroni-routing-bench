@@ -163,7 +163,11 @@ services:
     volumes:
       - ./results:/results
     environment:
-      TIMESCALE_CONNSTRING: "host=prb-tsdb port=5432 dbname=${TSDB_DB:-bench} user=${TSDB_USER:-bench} password=${TSDB_PASSWORD:-bench}"
+      TIMESCALE_HOST: prb-tsdb
+      TIMESCALE_PORT: "5432"
+      TIMESCALE_DB: ${TSDB_DB:-bench}
+      TIMESCALE_USER: ${TSDB_USER:-bench}
+      TIMESCALE_PASSWORD: ${TSDB_PASSWORD:-bench}
     depends_on:
       timescaledb:
         condition: service_healthy

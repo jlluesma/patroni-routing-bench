@@ -92,7 +92,7 @@
     - name: Run SQL query against TimescaleDB
       shell: "docker exec prb-tsdb psql -U bench -c '{{ sql }}'"
       register: query_result
-      when: obs_action == "query"
+      when: obs_action == "query" and sql is defined
 
     - name: Show query result
       debug:

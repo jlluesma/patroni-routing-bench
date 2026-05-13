@@ -1,4 +1,0 @@
-plotly
-kaleido==0.2.1
-psycopg[binary]
-pandas
