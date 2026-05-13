@@ -44,7 +44,23 @@
       when: obs_action == "start"
 
     - name: Start observer stack
-      shell: docker compose up -d
+      shell: docker compose --profile haproxy up -d
+      args:
+        chdir: "{{ tool_dir }}"
+      when: obs_action == "start"
+
+    - name: Wait for TimescaleDB to be ready
+      shell: docker exec prb-tsdb pg_isready -U bench
+      register: tsdb_ready
+      retries: 10
+      delay: 2
+      until: tsdb_ready.rc == 0
+      when: obs_action == "start"
+
+    - name: Apply TimescaleDB views
+      shell: >
+        docker cp {{ tool_dir }}/timescaledb/schema/003_create_views.sql prb-tsdb:/tmp/
+        && docker exec prb-tsdb psql -U bench -f /tmp/003_create_views.sql
       args:
         chdir: "{{ tool_dir }}"
       when: obs_action == "start"
@@ -94,10 +110,8 @@
     - name: Generate batch report
       shell: >
         docker compose --profile charts run --rm charts
-        batch-report
-        --batch-csv /results/{{ batch_dir | default('latest') }}/results.csv
-        --batch-dir /results/{{ batch_dir | default('latest') }}
-        --output /results/{{ batch_dir | default('latest') }}/batch_report.html
+        db-report
+        --output /results/batch_report.html
       args:
         chdir: "{{ tool_dir }}"
       when: obs_action == "generate-report"
@@ -114,7 +128,7 @@
 
     - name: Download batch report
       fetch:
-        src: "{{ tool_dir }}/results/{{ batch_dir | default('latest') }}/batch_report.html"
+        src: "{{ tool_dir }}/results/batch_report.html"
         dest: "{{ playbook_dir }}/../results/batch_report.html"
         flat: yes
       when: obs_action == "download-report"

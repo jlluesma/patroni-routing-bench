@@ -2100,6 +2100,122 @@ def cmd_batch_report(args):
     print(f"Batch report saved: {out_path}")
 
 
+def cmd_db_report(args):
+    """Generate batch report directly from TimescaleDB — no CSV needed."""
+    out_path = Path(args.output)
+    combo_filter = args.combination_id
+
+    conn = get_connection()
+    print("Connected to TimescaleDB")
+
+    query = """
+        SELECT
+            tr.id AS test_run_id,
+            tr.combination_id AS combo_dir,
+            tr.failover_type AS scenario,
+            tr.started_at,
+            fw.downtime_ms / 1000.0 AS downtime_s,
+            fw.total_failures AS failed_queries,
+            'SUCCESS' AS status
+        FROM test_runs tr
+        JOIN failover_window fw ON fw.test_run_id = tr.id
+    """
+    if combo_filter:
+        query += f" WHERE tr.combination_id = '{combo_filter}'"
+    query += " ORDER BY tr.combination_id, tr.failover_type, tr.started_at"
+
+    with conn.cursor() as cur:
+        cur.execute(query)
+        columns = [desc[0] for desc in cur.description]
+        rows = cur.fetchall()
+
+    if not rows:
+        sys.exit("ERROR: no test run data found in TimescaleDB. Run some failover tests first.")
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["downtime_s"] = pd.to_numeric(df["downtime_s"], errors="coerce")
+    df["failed_queries"] = pd.to_numeric(df["failed_queries"], errors="coerce").fillna(0).astype(int)
+    df["iteration"] = df.groupby(["combo_dir", "scenario"]).cumcount() + 1
+    df["prefix"] = "gcp"
+    df["leader_killed"] = ""
+    df["session_folder"] = ""
+
+    print(f"Found {len(df)} test runs across {df['combo_dir'].nunique()} combinations")
+    for combo in sorted(df["combo_dir"].unique()):
+        n = len(df[df["combo_dir"] == combo])
+        print(f"  {combo}: {n} runs")
+
+    generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    waterfall_data: dict = {}
+    for combo_id in sorted(df["combo_dir"].unique()):
+        medians = _compute_waterfall(conn, combo_id, scenario="hard_stop")
+        if medians:
+            waterfall_data[combo_id] = medians
+            print(f"  {combo_id}: waterfall ok")
+        else:
+            print(f"  {combo_id}: no waterfall data")
+
+    hero_html = _render_hero_chart(df, conn)
+
+    conn2 = get_connection()
+    iter_html     = _render_per_iteration_table(df, conn2)
+    failure_html  = _render_client_failure_analysis(df, conn2)
+    timeline_html = _render_client_latency_timeline(df, conn2)
+    conn2.close()
+
+    env_line = (
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"GCP Compute Engine &nbsp;|&nbsp; "
+        f"{df['combo_dir'].nunique()} combinations &nbsp;|&nbsp; "
+        f"{len(df['scenario'].unique())} scenarios &nbsp;|&nbsp; "
+        f"{len(df)} total runs"
+        f"</p>\n"
+    )
+
+    html = (
+        f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+        f"<meta charset=\"UTF-8\">"
+        f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+        f"<title>patroni-routing-bench — GCP Report</title>\n"
+        f"<style>{_BATCH_CSS}</style>\n</head>\n<body>\n"
+        f"<header><h1>Patroni Routing Benchmark — GCP Report</h1>"
+        f"<p>Generated {generated}</p></header>\n"
+        f"<div class='container'>\n"
+        f"<h2>1. Results Summary</h2>\n{env_line}{_render_batch_summary_table(df)}\n"
+        f"<h2>2. Downtime Heatmap — Combination × Scenario</h2>\n{_render_batch_heatmap(df)}\n"
+        f"<h2>3. Per-Scenario Comparison</h2>\n{_render_batch_scenario_bars(df)}\n"
+        f"<h2>4. Routing Layer Families</h2>\n{_render_batch_family_charts(df)}\n"
+        f"<h2>5. Server vs Client — Where Is the Time Spent?</h2>\n{hero_html}\n"
+        f"<h2>6. Failover Waterfall Timings</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>Milestone offsets are medians across hard_stop iterations for each combination.</p>\n"
+        f"{_render_batch_waterfall(waterfall_data)}\n"
+        f"<h2>7. Per-Iteration Detail</h2>\n{iter_html}\n"
+        f"<h2>8. Client Failure Analysis</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Error type breakdown during failover. \"Connect timeout\" errors indicate the "
+        f"client's TCP connection was accepted but not routed — the client waited the full "
+        f"connect_timeout (5s) before retrying. \"Connection refused\" and "
+        f"\"DNS resolution failed\" are instant failures (~2-7ms).</p>\n"
+        f"{failure_html}\n"
+        f"<h2>9. Client Latency Timeline</h2>\n"
+        f"<p style='font-size:13px;color:#555;margin-bottom:12px'>"
+        f"Per-query latency during a representative hard_stop failover for each combination. "
+        f"Red dots are failed queries, green dots are successful. The red dashed line marks "
+        f"first failure; the green dashed line marks recovery. Y-axis is log scale — tall "
+        f"red dots are connect timeout hangs (5s), short red dots are instant failures (2-7ms).</p>\n"
+        f"{timeline_html}\n"
+        f"</div>\n"
+        f"<footer>patroni-routing-bench — GCP — {generated}</footer>\n"
+        f"</body>\n</html>\n"
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    print(f"Report saved: {out_path}")
+    conn.close()
+
+
 def cmd_legacy(args):
     conn = get_connection()
     print("Connected to TimescaleDB")
@@ -2210,6 +2326,12 @@ def main():
     p_batch.add_argument("--batch-dir",  required=True, help="Batch results directory (for context)")
     p_batch.add_argument("--output",     required=True, help="Output HTML file path")
 
+    p_db = subs.add_parser("db-report",
+                            help="Generate report from TimescaleDB data (no CSV needed)")
+    p_db.add_argument("--output", required=True, help="Output HTML file path")
+    p_db.add_argument("--combination-id", default=None,
+                      help="Filter to a specific combination_id (default: all)")
+
     args = parser.parse_args()
 
     if args.subcommand == "iteration":
@@ -2218,6 +2340,8 @@ def main():
         cmd_combo_report(args)
     elif args.subcommand == "batch-report":
         cmd_batch_report(args)
+    elif args.subcommand == "db-report":
+        cmd_db_report(args)
     else:
         if not args.test_run_id and not args.combination_id and not args.compare:
             parser.print_help()
