@@ -50,28 +50,30 @@ ansible-playbook -i inventory/gcp.ini site.yml
 
 # 3. Verify the cluster
 ansible patroni -i inventory/gcp.ini -m shell \
-    -a "patronictl -c /etc/patroni/patroni.yml list"
+    -a "patronictl -c /etc/patroni/patroni.yml list" --become -l patroni-1
 
-# 4. SSH to observer VM and start the tool
-ssh deploy@$(cd ../terraform && terraform output -raw observer_external_ip)
-cd /opt/patroni-routing-bench/tool
-cp .env.gcp .env
-docker compose up -d
-docker compose --profile failover up -d
+# 4. Start the observer tool (from your laptop, no SSH needed)
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=start
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=start-client
 
-# 5. Trigger a failover (from your laptop)
-cd deploy/gcp
-./scripts/failover-test.sh --scenario hard_stop --target patroni-1
+# 5. Trigger a failover (auto-discovers leader)
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop
 
-# 6. Generate and download the report
-cd deploy/gcp/ansible
+# 6. Check results
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=query \
+    -e "sql=SELECT * FROM failover_window ORDER BY first_failure DESC LIMIT 5;"
+
+# 7. Recover the stopped node
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e recover=true -e target=patroni-1
+
+# 8. Generate and download the report
 ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=generate-report
 ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=download-report
 # Report saved to deploy/gcp/results/batch_report.html
 
-# 7. Tear down everything
-cd deploy/gcp
-./scripts/teardown.sh
+# 9. Tear down everything
+cd ../terraform
+terraform destroy
 ```
 
 ## Directory Structure
