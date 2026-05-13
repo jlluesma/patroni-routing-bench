@@ -158,21 +158,90 @@ ssh deploy@PATRONI_1_IP "sudo iptables -F INPUT && sudo iptables -F OUTPUT"
 ssh deploy@PATRONI_1_IP "patronictl -c /etc/patroni/patroni.yml switchover --master patroni-1 --force"
 ```
 
-## Reports
+## Full Workflow (from your laptop)
+
+All commands run from `deploy/gcp/ansible/`.
+
+### 1. Start observers
 
 ```bash
-# Generate report on observer VM
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=start
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=start-client
+```
+
+### 2. Check cluster state
+
+```bash
+ansible patroni -i inventory/gcp.ini -m shell \
+    -a "patronictl -c /etc/patroni/patroni.yml list" --become -l patroni-1
+```
+
+### 3. Inject failure (auto-discovers leader)
+
+```bash
+# Stop the leader gracefully
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop
+
+# Or target a specific node
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_stop -e target=patroni-2
+
+# Other scenarios
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=hard_kill
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=switchover
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=network_partition
+ansible-playbook -i inventory/gcp.ini inject.yml -e scenario=postgres_crash
+```
+
+### 4. Check results
+
+```bash
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=query \
+    -e "sql=SELECT * FROM failover_window ORDER BY first_failure DESC LIMIT 5;"
+```
+
+### 5. Recovery
+
+```bash
+ansible-playbook -i inventory/gcp.ini inject.yml \
+    -e scenario=hard_stop -e recover=true -e target=patroni-1
+```
+
+### 6. View observer logs
+
+```bash
+ansible-playbook -i inventory/gcp.ini observer.yml \
+    -e obs_action=logs -e container=prb-obs-patroni
+```
+
+Available containers: `prb-obs-patroni`, `prb-obs-consul`, `prb-obs-haproxy`,
+`prb-obs-postgres`, `prb-client-failover`, `prb-timescaledb`.
+
+### 7. Generate and download report
+
+```bash
 ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=generate-report
-
-# Download report and results CSV to your laptop (deploy/gcp/results/)
 ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=download-report
+# Report saved to deploy/gcp/results/batch_report.html
 
-# Specific batch directory (default: latest)
+# Specific batch directory
 ansible-playbook -i inventory/gcp.ini observer.yml \
     -e obs_action=generate-report -e batch_dir=batch_20260429_220606
 ```
 
-Reports are saved to `deploy/gcp/results/` on your laptop.
+### 8. Clean up before next batch
+
+```bash
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=truncate
+```
+
+Truncates `observer_events`, `client_events`, and `test_runs` — clean slate
+for the next batch without restarting containers.
+
+### 9. Stop everything
+
+```bash
+ansible-playbook -i inventory/gcp.ini observer.yml -e obs_action=stop
+```
 
 ---
 
