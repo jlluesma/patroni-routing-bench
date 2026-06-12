@@ -1,0 +1,82 @@
+###############################################################################
+# HAProxy — patroni-routing-bench GCP deployment
+# Combination 08 — consul-template Runtime API (zero-reload)
+#
+# STATIC config — consul-template never rewrites or reloads this file.
+# Instead, it sends "set server primary_backend/<name> state ready|maint"
+# commands via the admin socket (/var/run/haproxy/admin.sock) using socat.
+# HAProxy's httpchk health checks provide a second layer of validation.
+#
+# Server name alignment: servers are named by inventory hostname (e.g.
+# "patroni-1"). The update script uses {{.Node}} from the Consul catalog,
+# which equals the VM hostname (set by GCP to the instance name). This is
+# verified by the absence of a node_name override in the consul agent config.
+#
+# primary_backend servers start in MAINT (disabled). consul-template sets
+# the correct states on first run, immediately after HAProxy starts.
+###############################################################################
+
+global
+    maxconn 1000
+    log stdout format raw local0
+    stats socket /var/run/haproxy/admin.sock mode 660 level admin
+
+defaults
+    mode tcp
+    log global
+    option log-health-checks
+    retries 3
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+    timeout check 2s
+
+# ---------------------------------------------------------------------------
+# Stats & Prometheus endpoint
+# ---------------------------------------------------------------------------
+frontend stats
+    bind *:{{ haproxy_stats_port }}
+    mode http
+    http-request use-service prometheus-exporter if { path /metrics }
+    stats enable
+    stats uri /stats
+    stats refresh 5s
+    stats show-legends
+
+# ---------------------------------------------------------------------------
+# Primary (read-write) — port {{ haproxy_primary_port }}
+# Server state managed by consul-template Runtime API commands.
+# Servers start disabled (maint); consul-template sets ready/maint on first run.
+# HAProxy's httpchk provides a second validation layer on ready servers.
+# ---------------------------------------------------------------------------
+frontend primary_frontend
+    bind *:{{ haproxy_primary_port }}
+    default_backend primary_backend
+
+backend primary_backend
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter {{ haproxy_check_inter }} fall {{ haproxy_check_fall }} rise {{ haproxy_check_rise }} on-marked-down {{ haproxy_on_marked_down }}
+
+{% for host in groups['patroni'] %}
+    server {{ host }} {{ hostvars[host]['internal_ip'] }}:5432 check port {{ patroni_restapi_port }} disabled
+{% endfor %}
+
+# ---------------------------------------------------------------------------
+# Replicas (read-only) — port {{ haproxy_replica_port }}
+# consul-template does NOT manage this backend via Runtime API.
+# HAProxy's own /replica health checks drive all routing decisions here.
+# ---------------------------------------------------------------------------
+frontend replica_frontend
+    bind *:{{ haproxy_replica_port }}
+    default_backend replica_backend
+
+backend replica_backend
+    option httpchk GET /replica
+    http-check expect status 200
+    balance roundrobin
+    default-server inter {{ haproxy_check_inter }} fall {{ haproxy_check_fall }} rise {{ haproxy_check_rise }} on-marked-down {{ haproxy_on_marked_down }}
+
+{% for host in groups['patroni'] %}
+    server {{ host }} {{ hostvars[host]['internal_ip'] }}:5432 check port {{ patroni_restapi_port }}
+{% endfor %}

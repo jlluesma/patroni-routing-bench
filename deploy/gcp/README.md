@@ -44,7 +44,7 @@ in `ansible/combos/`. The default is `06-haproxy-rest-polling`.
 | `06-haproxy-rest-polling` | HAProxy, Patroni REST `/primary`+`/replica` health checks, default DCS timing | Supported |
 | `06-haproxy-rest-polling-tuned` | Same as above with tuned DCS timing (ttl=20, loop_wait=5) | Supported |
 | `07-consul-template-reload` | consul-template renders haproxy.cfg on Consul catalog change; zero-downtime reload via master socket | Supported |
-| `08-consul-template-runtime-api` | HAProxy backends updated via runtime API | Planned |
+| `08-consul-template-runtime-api` | consul-template renders a shell script that flips server states via the HAProxy Runtime API socket; HAProxy never reloads | Supported |
 | `09-patroni-callback-haproxy` | HAProxy updated via Patroni on_role_change callbacks | Planned |
 
 To deploy with a non-default combo:
@@ -56,10 +56,13 @@ ansible-playbook -i inventory/gcp.ini site.yml -e @combos/06-haproxy-rest-pollin
 # Deploy combo 07 (consul-template + HAProxy reload)
 ansible-playbook -i inventory/gcp.ini site.yml -e @combos/07-consul-template-reload.yml
 
+# Deploy combo 08 (consul-template Runtime API, no reload)
+ansible-playbook -i inventory/gcp.ini site.yml -e @combos/08-consul-template-runtime-api.yml
+
 # Inject failures tagged with the combo ID
 ansible-playbook -i inventory/gcp.ini inject.yml \
     -e scenario=hard_stop \
-    -e combo_id=07-consul-template-reload
+    -e combo_id=08-consul-template-runtime-api
 ```
 
 **Combo 07 — master-worker mode:** HAProxy runs with `-Ws -S /run/haproxy/master.sock`
@@ -68,6 +71,8 @@ sends `echo reload | socat - UNIX-CONNECT:/run/haproxy/master.sock` on every Con
 change. The master process forks new workers with the updated config and drains the old ones —
 no connection drops. This mechanism only applies to combo 07; combos 06/06-tuned use the stock
 HAProxy service unit unchanged.
+
+**Combo 08 — Runtime API (zero-reload):** HAProxy runs as a plain service (no master-worker mode, no master socket). consul-template renders `update-haproxy.sh` from a ctmpl on every Consul catalog change and executes it. The script sends `set server primary_backend/<name> state ready|maint` to `/var/run/haproxy/admin.sock` via socat. Server states flip atomically — HAProxy never restarts or reloads. Servers are named by inventory hostname (`patroni-1` etc.), matching `{{.Node}}` in the consul-template catalog.
 
 The active combo is written to `/etc/patroni-routing-bench-combo` on every host —
 readable via `cat /etc/patroni-routing-bench-combo` or an Ansible ad-hoc command.

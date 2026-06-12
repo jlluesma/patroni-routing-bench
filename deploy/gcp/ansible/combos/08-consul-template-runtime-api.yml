@@ -1,0 +1,7 @@
+---
+routing_combo: "08-consul-template-runtime-api"
+# Same DCS timing baseline as combos 06/07 (fair comparison)
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+consul_template_version: "0.39.2"

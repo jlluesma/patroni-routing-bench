@@ -1,0 +1,16 @@
+# consul-template configuration — combo 08 (Runtime API, zero-reload)
+#
+# Watches the Consul service catalog for the "bench" service. On any change
+# (registration, deregistration, health state), renders update-haproxy.sh
+# from the ctmpl and immediately executes it. The script sends Runtime API
+# commands to /var/run/haproxy/admin.sock via socat. HAProxy never reloads.
+
+consul {
+  address = "http://{{ consul_server_ip }}:8500"
+}
+
+template {
+  source      = "/etc/consul-template/update-haproxy.sh.ctmpl"
+  destination = "/tmp/update-haproxy.sh"
+  command     = "bash /tmp/update-haproxy.sh"
+}

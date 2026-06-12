@@ -1,0 +1,69 @@
+---
+# Combo 08 — consul-template Runtime API (zero-reload)
+#
+# HAProxy runs as a plain service with a STATIC config (no master-worker mode,
+# no master socket). consul-template renders a shell script on Consul catalog
+# changes and executes it. The script sends "set server ... state ready/maint"
+# commands to the HAProxy admin socket via socat. HAProxy never reloads.
+
+- name: Install socat (required for Runtime API socket commands)
+  apt:
+    name: socat
+    state: present
+
+- name: Download consul-template archive
+  get_url:
+    url: "https://releases.hashicorp.com/consul-template/{{ consul_template_version }}/consul-template_{{ consul_template_version }}_linux_amd64.zip"
+    dest: "/tmp/consul-template_{{ consul_template_version }}_linux_amd64.zip"
+    mode: "0644"
+
+- name: Install consul-template binary
+  ansible.builtin.unarchive:
+    src: "/tmp/consul-template_{{ consul_template_version }}_linux_amd64.zip"
+    dest: /usr/local/bin/
+    remote_src: true
+    mode: "0755"
+
+- name: Create consul-template config directory
+  file:
+    path: /etc/consul-template
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy static haproxy.cfg for combo 08
+  template:
+    src: haproxy.cfg.combo08.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: haproxy
+    mode: "0640"
+    validate: "haproxy -c -f %s"
+  notify: restart haproxy
+
+- name: Deploy update-haproxy.sh.ctmpl
+  template:
+    src: update-haproxy.sh.ctmpl.j2
+    dest: /etc/consul-template/update-haproxy.sh.ctmpl
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy consul-template.hcl (combo 08)
+  template:
+    src: consul-template-08.hcl.j2
+    dest: /etc/consul-template/consul-template.hcl
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy consul-template systemd unit
+  template:
+    src: consul-template.service.j2
+    dest: /etc/systemd/system/consul-template.service
+    mode: "0644"
+  notify: reload systemd
+
+- name: Flush handlers (daemon-reload before HAProxy start)
+  meta: flush_handlers
