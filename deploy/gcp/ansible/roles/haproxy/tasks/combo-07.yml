@@ -1,0 +1,84 @@
+---
+# Combo 07 — consul-template + HAProxy reload via master CLI socket
+#
+# HAProxy runs in master-worker mode (-Ws -S /run/haproxy/master.sock).
+# consul-template watches the Consul service catalog for the "bench" service,
+# re-renders haproxy.cfg, and triggers zero-downtime reloads via the socket.
+
+- name: Install socat (required for master-socket reload)
+  apt:
+    name: socat
+    state: present
+
+- name: Download consul-template archive
+  get_url:
+    url: "https://releases.hashicorp.com/consul-template/{{ consul_template_version }}/consul-template_{{ consul_template_version }}_linux_amd64.zip"
+    dest: "/tmp/consul-template_{{ consul_template_version }}_linux_amd64.zip"
+    mode: "0644"
+
+- name: Install consul-template binary
+  ansible.builtin.unarchive:
+    src: "/tmp/consul-template_{{ consul_template_version }}_linux_amd64.zip"
+    dest: /usr/local/bin/
+    remote_src: true
+    mode: "0755"
+
+- name: Create consul-template config directory
+  file:
+    path: /etc/consul-template
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy haproxy.cfg.ctmpl
+  template:
+    src: haproxy.cfg.ctmpl.j2
+    dest: /etc/consul-template/haproxy.cfg.ctmpl
+    owner: root
+    group: haproxy
+    mode: "0640"
+
+- name: Deploy consul-template.hcl
+  template:
+    src: consul-template.hcl.j2
+    dest: /etc/consul-template/consul-template.hcl
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create HAProxy systemd override directory
+  file:
+    path: /etc/systemd/system/haproxy.service.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy HAProxy systemd override (master-worker mode + master socket)
+  copy:
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/usr/sbin/haproxy -Ws -f $CONFIG -p $PIDFILE -S /run/haproxy/master.sock $EXTRAOPTS
+    dest: /etc/systemd/system/haproxy.service.d/override.conf
+    mode: "0644"
+  notify:
+    - reload systemd
+
+- name: Flush handlers (daemon-reload before rendering initial config)
+  meta: flush_handlers
+
+- name: Render initial haproxy.cfg via consul-template (one-shot)
+  command: /usr/local/bin/consul-template -config=/etc/consul-template/consul-template.hcl -once
+  register: ct_once
+  failed_when: ct_once.rc != 0
+
+- name: Deploy consul-template systemd unit
+  template:
+    src: consul-template.service.j2
+    dest: /etc/systemd/system/consul-template.service
+    mode: "0644"
+  notify:
+    - reload systemd
+
+- name: Flush handlers (daemon-reload before service enable)
+  meta: flush_handlers

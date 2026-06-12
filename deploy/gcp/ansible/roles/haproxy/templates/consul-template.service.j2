@@ -1,0 +1,14 @@
+[Unit]
+Description=consul-template — HAProxy config renderer (combo 07)
+Documentation=https://github.com/hashicorp/consul-template
+After=network-online.target haproxy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/consul-template -config=/etc/consul-template/consul-template.hcl
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

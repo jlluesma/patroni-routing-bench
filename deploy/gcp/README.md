@@ -43,7 +43,7 @@ in `ansible/combos/`. The default is `06-haproxy-rest-polling`.
 |---|---|---|
 | `06-haproxy-rest-polling` | HAProxy, Patroni REST `/primary`+`/replica` health checks, default DCS timing | Supported |
 | `06-haproxy-rest-polling-tuned` | Same as above with tuned DCS timing (ttl=20, loop_wait=5) | Supported |
-| `07-consul-template-reload` | HAProxy config reloaded via consul-template | Planned |
+| `07-consul-template-reload` | consul-template renders haproxy.cfg on Consul catalog change; zero-downtime reload via master socket | Supported |
 | `08-consul-template-runtime-api` | HAProxy backends updated via runtime API | Planned |
 | `09-patroni-callback-haproxy` | HAProxy updated via Patroni on_role_change callbacks | Planned |
 
@@ -53,11 +53,21 @@ To deploy with a non-default combo:
 # Deploy the tuned variant
 ansible-playbook -i inventory/gcp.ini site.yml -e @combos/06-haproxy-rest-polling-tuned.yml
 
+# Deploy combo 07 (consul-template + HAProxy reload)
+ansible-playbook -i inventory/gcp.ini site.yml -e @combos/07-consul-template-reload.yml
+
 # Inject failures tagged with the combo ID
 ansible-playbook -i inventory/gcp.ini inject.yml \
     -e scenario=hard_stop \
-    -e combo_id=06-haproxy-rest-polling-tuned
+    -e combo_id=07-consul-template-reload
 ```
+
+**Combo 07 — master-worker mode:** HAProxy runs with `-Ws -S /run/haproxy/master.sock`
+(injected via a systemd drop-in override in `haproxy.service.d/override.conf`). consul-template
+sends `echo reload | socat - UNIX-CONNECT:/run/haproxy/master.sock` on every Consul catalog
+change. The master process forks new workers with the updated config and drains the old ones —
+no connection drops. This mechanism only applies to combo 07; combos 06/06-tuned use the stock
+HAProxy service unit unchanged.
 
 The active combo is written to `/etc/patroni-routing-bench-combo` on every host —
 readable via `cat /etc/patroni-routing-bench-combo` or an Ansible ad-hoc command.

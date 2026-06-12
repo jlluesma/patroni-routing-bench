@@ -1,0 +1,8 @@
+---
+routing_combo: "07-consul-template-reload"
+# Same DCS timing baseline as combo 06 (fair comparison)
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+# Pinned consul-template release
+consul_template_version: "0.39.2"

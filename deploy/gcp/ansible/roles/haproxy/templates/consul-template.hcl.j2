@@ -1,0 +1,15 @@
+# consul-template configuration — combo 07 (HAProxy reload via master socket)
+#
+# Watches the Consul service catalog for the "bench" service. On any change
+# (registration, deregistration, health state), re-renders haproxy.cfg and
+# reloads HAProxy by sending "reload" to the master CLI socket via socat.
+
+consul {
+  address = "http://{{ consul_server_ip }}:8500"
+}
+
+template {
+  source      = "/etc/consul-template/haproxy.cfg.ctmpl"
+  destination = "/etc/haproxy/haproxy.cfg"
+  command     = "echo reload | socat - UNIX-CONNECT:/run/haproxy/master.sock 2>/dev/null || true"
+}
