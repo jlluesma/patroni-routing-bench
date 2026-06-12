@@ -15,3 +15,5 @@ deploy/gcp/terraform/terraform.tfstate
 deploy/gcp/terraform/terraform.tfstate.backup
 deploy/gcp/terraform/terraform.tfvars
 deploy/gcp/ansible/inventory/gcp.ini
+*.tfstate
+*.tfstate.backup

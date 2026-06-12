@@ -34,6 +34,34 @@ Docker overlay.
 - Ansible >= 2.14 (`pip install ansible`)
 - SSH key pair at `~/.ssh/id_rsa` (or configure `ssh_public_key_path` in tfvars)
 
+## Routing Combos
+
+The deployment supports multiple routing combinations via per-combo vars files
+in `ansible/combos/`. The default is `06-haproxy-rest-polling`.
+
+| Combo | Description | Status |
+|---|---|---|
+| `06-haproxy-rest-polling` | HAProxy, Patroni REST `/primary`+`/replica` health checks, default DCS timing | Supported |
+| `06-haproxy-rest-polling-tuned` | Same as above with tuned DCS timing (ttl=20, loop_wait=5) | Supported |
+| `07-consul-template-reload` | HAProxy config reloaded via consul-template | Planned |
+| `08-consul-template-runtime-api` | HAProxy backends updated via runtime API | Planned |
+| `09-patroni-callback-haproxy` | HAProxy updated via Patroni on_role_change callbacks | Planned |
+
+To deploy with a non-default combo:
+
+```bash
+# Deploy the tuned variant
+ansible-playbook -i inventory/gcp.ini site.yml -e @combos/06-haproxy-rest-polling-tuned.yml
+
+# Inject failures tagged with the combo ID
+ansible-playbook -i inventory/gcp.ini inject.yml \
+    -e scenario=hard_stop \
+    -e combo_id=06-haproxy-rest-polling-tuned
+```
+
+The active combo is written to `/etc/patroni-routing-bench-combo` on every host —
+readable via `cat /etc/patroni-routing-bench-combo` or an Ansible ad-hoc command.
+
 ## Quick Start
 
 ```bash
@@ -46,7 +74,10 @@ terraform apply
 
 # 2. Configure the cluster (~5 min)
 cd ../ansible
+# Default combo (06-haproxy-rest-polling):
 ansible-playbook -i inventory/gcp.ini site.yml
+# Or specify a combo explicitly:
+# ansible-playbook -i inventory/gcp.ini site.yml -e @combos/06-haproxy-rest-polling-tuned.yml
 
 # 3. Verify the cluster
 ansible patroni -i inventory/gcp.ini -m shell \

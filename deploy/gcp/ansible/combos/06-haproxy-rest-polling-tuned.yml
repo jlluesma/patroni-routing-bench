@@ -1,0 +1,6 @@
+---
+routing_combo: "06-haproxy-rest-polling-tuned"
+# Tuned DCS timing — mirrors dcs/consul/06-haproxy-rest-polling-tuned
+patroni_ttl: 20
+patroni_loop_wait: 5
+patroni_retry_timeout: 5

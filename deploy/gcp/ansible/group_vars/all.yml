@@ -1,4 +1,8 @@
 ---
+# Routing combination deployed by site.yml.
+# Override with a combo vars file: -e @combos/<combo>.yml
+routing_combo: "06-haproxy-rest-polling"
+
 # Static internal IPs — must match Terraform locals.ip
 patroni_1_ip:   "10.0.1.10"
 patroni_2_ip:   "10.0.1.11"

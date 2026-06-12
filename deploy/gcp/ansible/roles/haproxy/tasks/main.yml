@@ -1,4 +1,9 @@
 ---
+- name: Verify routing_combo is supported by the GCP deployment
+  ansible.builtin.fail:
+    msg: "routing_combo '{{ routing_combo }}' is not implemented in deploy/gcp yet"
+  when: routing_combo not in ['06-haproxy-rest-polling', '06-haproxy-rest-polling-tuned']
+
 - name: Install HAProxy
   apt:
     name: haproxy
@@ -12,15 +17,9 @@
     group: haproxy
     mode: "0750"
 
-- name: Deploy haproxy.cfg
-  template:
-    src: haproxy.cfg.j2
-    dest: /etc/haproxy/haproxy.cfg
-    owner: root
-    group: haproxy
-    mode: "0640"
-    validate: "haproxy -c -f %s"
-  notify: restart haproxy
+- name: Include combo-specific HAProxy configuration
+  ansible.builtin.include_tasks: "combo-06.yml"
+  when: routing_combo in ['06-haproxy-rest-polling', '06-haproxy-rest-polling-tuned']
 
 - name: Enable and start HAProxy
   service:

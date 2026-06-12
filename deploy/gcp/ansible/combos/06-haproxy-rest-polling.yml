@@ -1,0 +1,6 @@
+---
+routing_combo: "06-haproxy-rest-polling"
+# Docker benchmark defaults (fair comparison baseline)
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10

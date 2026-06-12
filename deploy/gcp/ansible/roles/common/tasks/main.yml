@@ -46,3 +46,9 @@
 - name: Set timezone to UTC
   timezone:
     name: UTC
+
+- name: Record active routing combo
+  copy:
+    content: "{{ routing_combo }}\n"
+    dest: /etc/patroni-routing-bench-combo
+    mode: "0644"
