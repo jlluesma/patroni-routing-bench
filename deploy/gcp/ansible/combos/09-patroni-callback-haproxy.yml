@@ -1,0 +1,7 @@
+---
+routing_combo: "09-patroni-callback-haproxy"
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+# TCP port for HAProxy Runtime API — Patroni nodes connect here to flip server states
+haproxy_callback_port: 9999

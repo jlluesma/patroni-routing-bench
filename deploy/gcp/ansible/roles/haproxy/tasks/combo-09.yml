@@ -1,0 +1,23 @@
+---
+# Combo 09 — Patroni callback → HAProxy Runtime API
+#
+# HAProxy runs as a plain service with a STATIC config (no consul-template,
+# no master-worker mode). Patroni calls haproxy_callback.sh on every role
+# transition; the script sends "set server primary_backend/<name> state
+# ready|maint" to HAProxy's TCP Runtime API socket (port {{ haproxy_callback_port }}).
+#
+# No socat is needed on the HAProxy host — the TCP socket is consumed by
+# Python's socket module running on the Patroni nodes.
+
+- name: Deploy static haproxy.cfg for combo 09
+  template:
+    src: haproxy.cfg.combo09.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: haproxy
+    mode: "0640"
+    validate: "haproxy -c -f %s"
+  notify: restart haproxy
+
+- name: Flush handlers (restart HAProxy before Patroni callback fires)
+  meta: flush_handlers

@@ -1,0 +1,80 @@
+###############################################################################
+# HAProxy — patroni-routing-bench GCP deployment
+# Combination 09 — Patroni Callback → HAProxy Runtime API
+#
+# STATIC config — Patroni's on_role_change callback flips server states via
+# the TCP Runtime API socket. HAProxy never reloads. HAProxy's own httpchk
+# provides a secondary validation layer on servers in "ready" state.
+#
+# Server names match Ansible inventory hostnames (e.g. "patroni-1"), which
+# are baked into the per-node callback script at deploy time.
+#
+# Two Runtime API endpoints:
+#   Unix socket: /var/run/haproxy/admin.sock  — local admin access
+#   TCP socket:  {{ internal_ip }}:{{ haproxy_callback_port }}  — cross-VM callbacks from Patroni nodes
+###############################################################################
+
+global
+    maxconn 1000
+    log stdout format raw local0
+    stats socket /var/run/haproxy/admin.sock mode 660 level admin
+    stats socket ipv4@{{ internal_ip }}:{{ haproxy_callback_port }} level admin
+
+defaults
+    mode tcp
+    log global
+    option log-health-checks
+    retries 3
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+    timeout check 2s
+
+# ---------------------------------------------------------------------------
+# Stats & Prometheus endpoint
+# ---------------------------------------------------------------------------
+frontend stats
+    bind *:{{ haproxy_stats_port }}
+    mode http
+    http-request use-service prometheus-exporter if { path /metrics }
+    stats enable
+    stats uri /stats
+    stats refresh 5s
+    stats show-legends
+
+# ---------------------------------------------------------------------------
+# Primary (read-write) — port {{ haproxy_primary_port }}
+# Callback sets state ready/maint; httpchk provides secondary validation.
+# Servers start disabled (maint); the callback promotes the leader on first
+# role_change after Patroni starts.
+# ---------------------------------------------------------------------------
+frontend primary_frontend
+    bind *:{{ haproxy_primary_port }}
+    default_backend primary_backend
+
+backend primary_backend
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter {{ haproxy_check_inter }} fall {{ haproxy_check_fall }} rise {{ haproxy_check_rise }} on-marked-down {{ haproxy_on_marked_down }}
+
+{% for host in groups['patroni'] %}
+    server {{ host }} {{ hostvars[host]['internal_ip'] }}:5432 check port {{ patroni_restapi_port }} disabled
+{% endfor %}
+
+# ---------------------------------------------------------------------------
+# Replicas (read-only) — port {{ haproxy_replica_port }}
+# Callback does not manage replica_backend; HAProxy's /replica checks drive it.
+# ---------------------------------------------------------------------------
+frontend replica_frontend
+    bind *:{{ haproxy_replica_port }}
+    default_backend replica_backend
+
+backend replica_backend
+    option httpchk GET /replica
+    http-check expect status 200
+    balance roundrobin
+    default-server inter {{ haproxy_check_inter }} fall {{ haproxy_check_fall }} rise {{ haproxy_check_rise }} on-marked-down {{ haproxy_on_marked_down }}
+
+{% for host in groups['patroni'] %}
+    server {{ host }} {{ hostvars[host]['internal_ip'] }}:5432 check port {{ patroni_restapi_port }}
+{% endfor %}
