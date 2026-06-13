@@ -1,0 +1,10 @@
+---
+# Thin wrapper so the localhost batch runner can invoke stabilize via
+# ansible-playbook, consistent with how it calls site.yml / inject.yml.
+- name: Verify cluster health
+  hosts: patroni
+  gather_facts: false
+  vars_files:
+    - batch_vars.yml
+  tasks:
+    - ansible.builtin.include_tasks: tasks/stabilize.yml

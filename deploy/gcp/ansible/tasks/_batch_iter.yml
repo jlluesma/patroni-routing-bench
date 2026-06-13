@@ -1,0 +1,63 @@
+---
+# Single (combo, scenario, iteration) cell.
+# work_item: [scenario, iter_num] from _batch_combo.yml loop
+# combo: inherited from run-batch.yml outer loop
+#
+# switchover recovers automatically — no explicit recover step.
+# All other scenarios require explicit recovery targeting the downed node,
+# discovered by parsing the node name from inject.yml's "Failover target:" output.
+
+- name: "{{ combo }} / {{ work_item[0] }} / iter {{ work_item[1] }}"
+  block:
+    - name: Inject failure
+      ansible.builtin.command:
+        cmd: >
+          ansible-playbook -i {{ batch_inventory }} inject.yml
+          -e scenario={{ work_item[0] }}
+          -e combo_id={{ combo }}-gcp
+          -e post_wait={{ batch_post_wait }}
+        chdir: "{{ playbook_dir }}"
+      register: inject_result
+      changed_when: true
+
+    - name: Extract downed node from inject output
+      ansible.builtin.set_fact:
+        _downed_node: "{{ (inject_result.stdout | regex_findall('Failover target: ([a-z0-9-]+)')) | first }}"
+      when: work_item[0] != 'switchover'
+
+    - name: Recover downed node
+      ansible.builtin.command:
+        cmd: >
+          ansible-playbook -i {{ batch_inventory }} inject.yml
+          -e scenario={{ work_item[0] }}
+          -e recover=true
+          -e target={{ _downed_node }}
+        chdir: "{{ playbook_dir }}"
+      register: recover_result
+      changed_when: true
+      when: work_item[0] != 'switchover'
+
+    - name: Stabilise cluster
+      ansible.builtin.command:
+        cmd: >
+          ansible-playbook -i {{ batch_inventory }} stabilize-play.yml
+          -e batch_settle_seconds={{ batch_settle_seconds }}
+        chdir: "{{ playbook_dir }}"
+      changed_when: false
+
+    - name: Record success
+      ansible.builtin.set_fact:
+        batch_results: >-
+          {{ batch_results + [{'combo': combo, 'scenario': work_item[0],
+             'iter': work_item[1], 'status': 'ok'}] }}
+
+  rescue:
+    - name: Log failure
+      ansible.builtin.debug:
+        msg: "FAILED: {{ combo }} / {{ work_item[0] }} / iter {{ work_item[1] }}"
+
+    - name: Record failure
+      ansible.builtin.set_fact:
+        batch_results: >-
+          {{ batch_results + [{'combo': combo, 'scenario': work_item[0],
+             'iter': work_item[1], 'status': 'FAILED'}] }}

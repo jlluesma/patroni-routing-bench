@@ -1,0 +1,75 @@
+---
+# GCP benchmark batch runner
+#
+# Usage:
+#   ansible-playbook -i inventory/gcp.ini run-batch.yml
+#
+# Edit batch_vars.yml to change the matrix (combos / scenarios / iterations).
+#
+# What this does:
+#   For each combo: deploy via site.yml, verify healthy, then run every
+#   scenario × iteration. Each iteration: inject.yml (failover + tagging),
+#   recover, stabilise. A failed iteration is logged and skipped; the batch
+#   continues. Measurement data lives in TimescaleDB (via inject.yml); this
+#   runner tracks only pass/fail per cell.
+#
+# NOTE on combo switching: deploying combo 07 installs a HAProxy master-worker
+# systemd override. Subsequent combos (08, 09) do not remove it — HAProxy will
+# still start in master-worker mode. For a clean comparison, use one combo per
+# fresh cluster (terraform destroy + apply between combos). If running all
+# combos on one cluster, the default order (07 before 08/09) is least harmful.
+#
+# Results:
+#   Measurement data: TimescaleDB on the observer VM (query via observer.yml)
+#   Run summary: deploy/gcp/results/batch-run-summary.yml
+
+- name: GCP benchmark batch
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - batch_vars.yml
+
+  tasks:
+    - name: Initialise results collector
+      ansible.builtin.set_fact:
+        batch_results: []
+
+    - name: Ensure results directory exists
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../results"
+        state: directory
+        mode: "0755"
+
+    - name: Show batch plan
+      ansible.builtin.debug:
+        msg: >
+          Starting batch:
+          {{ batch_combos | length }} combos ×
+          {{ batch_scenarios | length }} scenarios ×
+          {{ batch_iterations }} iterations =
+          {{ batch_combos | length * batch_scenarios | length * batch_iterations }} total iterations.
+
+    - name: Run combo
+      ansible.builtin.include_tasks: tasks/_batch_combo.yml
+      loop: "{{ batch_combos }}"
+      loop_control:
+        loop_var: combo
+        label: "{{ combo }}"
+
+    - name: Batch summary
+      ansible.builtin.debug:
+        msg: |
+          ======== BATCH COMPLETE ========
+          Total : {{ batch_results | length }}
+          OK    : {{ batch_results | selectattr('status', 'equalto', 'ok') | list | length }}
+          FAILED: {{ batch_results | selectattr('status', 'equalto', 'FAILED') | list | length }}
+          Summary written to deploy/gcp/results/batch-run-summary.yml
+          Measurement data: query TimescaleDB via observer.yml -e obs_action=query
+
+    - name: Write run summary
+      ansible.builtin.copy:
+        content: "{{ batch_results | to_nice_yaml }}"
+        dest: "{{ playbook_dir }}/../results/batch-run-summary.yml"
+        mode: "0644"

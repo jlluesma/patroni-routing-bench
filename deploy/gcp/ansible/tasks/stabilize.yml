@@ -1,0 +1,33 @@
+---
+# Health gate — runs against patroni hosts (via stabilize-play.yml).
+#
+# status_code: [200, 503] lets the uri task succeed on both codes so
+# the until: condition drives retries. A node temporarily at 503 (catching
+# up after recovery) keeps retrying; connection errors still fail the task.
+# This is the critical subtlety vs strict status_code: 200.
+
+- name: "Wait for Patroni /health on {{ inventory_hostname }}"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ patroni_restapi_port | default(8008) }}/health"
+    status_code: [200, 503]
+  register: node_health
+  until: node_health.status == 200
+  retries: "{{ stabilize_health_retries | default(30) }}"
+  delay: "{{ stabilize_health_delay | default(4) }}"
+
+- name: Verify cluster has exactly 1 leader and 3 members
+  ansible.builtin.uri:
+    url: "http://localhost:{{ patroni_restapi_port | default(8008) }}/cluster"
+    return_content: true
+  register: cluster_topology
+  until: >
+    (cluster_topology.json.members | selectattr('role', 'equalto', 'leader') | list | length == 1)
+    and (cluster_topology.json.members | length == 3)
+  retries: "{{ stabilize_health_retries | default(30) }}"
+  delay: "{{ stabilize_health_delay | default(4) }}"
+  run_once: true
+
+- name: Settle after health gate
+  ansible.builtin.pause:
+    seconds: "{{ batch_settle_seconds | default(20) }}"
+  run_once: true

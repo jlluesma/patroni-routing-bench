@@ -1,0 +1,27 @@
+---
+# Per-combo orchestration: deploy once, verify healthy, then run all
+# scenario × iteration cells. `combo` is the loop_var from run-batch.yml.
+
+- name: "Deploy {{ combo }}"
+  ansible.builtin.command:
+    cmd: "ansible-playbook -i {{ batch_inventory }} site.yml -e @combos/{{ combo }}.yml"
+    chdir: "{{ playbook_dir }}"
+  register: deploy_result
+  changed_when: true
+
+- name: "Verify cluster healthy after deploying {{ combo }}"
+  ansible.builtin.command:
+    cmd: >
+      ansible-playbook -i {{ batch_inventory }} stabilize-play.yml
+      -e batch_settle_seconds={{ batch_settle_seconds }}
+    chdir: "{{ playbook_dir }}"
+  changed_when: false
+
+# product() builds the Cartesian product:
+#   [['hard_stop', 1], ['hard_stop', 2], ..., ['network_partition', 5]]
+- name: "{{ combo }} — {{ work_item[0] }} iter {{ work_item[1] }}"
+  ansible.builtin.include_tasks: tasks/_batch_iter.yml
+  loop: "{{ batch_scenarios | product(range(1, batch_iterations + 1) | list) | list }}"
+  loop_control:
+    loop_var: work_item
+    label: "{{ work_item[0] }}/{{ work_item[1] }}"
