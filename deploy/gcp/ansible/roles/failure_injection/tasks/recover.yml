@@ -1,25 +1,136 @@
 ---
-- name: Flush iptables INPUT (network partition recovery)
-  shell: "iptables -F INPUT"
-  become: true
-  ignore_errors: true
+# ---- Network partition recovery: remove only patroni-bench-tagged rules ----
+# Both full-partition and asymmetric rules are attempted regardless of which
+# mode was used — deleting an absent rule is a no-op, so this is idempotent.
+# No iptables -F: only tagged rules are removed; GCP guest-agent rules and any
+# other pre-existing rules are left intact.
 
-- name: Flush iptables OUTPUT (network partition recovery)
-  shell: "iptables -F OUTPUT"
+- name: Remove full partition rules (INPUT)
+  ansible.builtin.iptables:
+    chain: INPUT
+    source: "{{ cluster_subnet }}"
+    jump: "{{ partition_jump }}"
+    comment: "patroni-bench: network partition"
+    state: absent
   become: true
-  ignore_errors: true
+  when: scenario == 'network_partition'
+
+- name: Remove full partition rules (OUTPUT)
+  ansible.builtin.iptables:
+    chain: OUTPUT
+    destination: "{{ cluster_subnet }}"
+    jump: "{{ partition_jump }}"
+    comment: "patroni-bench: network partition"
+    state: absent
+  become: true
+  when: scenario == 'network_partition'
+
+- name: Remove asymmetric partition rules (INPUT)
+  ansible.builtin.iptables:
+    chain: INPUT
+    source: "{{ item }}"
+    jump: "{{ partition_jump }}"
+    comment: "patroni-bench: asymmetric partition from {{ item }}"
+    state: absent
+  become: true
+  loop: "{{ partition_block_ips | default([]) }}"
+  when: scenario == 'network_partition' and (partition_block_ips | default([])) | length > 0
+
+- name: Remove asymmetric partition rules (OUTPUT)
+  ansible.builtin.iptables:
+    chain: OUTPUT
+    destination: "{{ item }}"
+    jump: "{{ partition_jump }}"
+    comment: "patroni-bench: asymmetric partition to {{ item }}"
+    state: absent
+  become: true
+  loop: "{{ partition_block_ips | default([]) }}"
+  when: scenario == 'network_partition' and (partition_block_ips | default([])) | length > 0
+
+- name: Remove preserve rules — established/related (INPUT)
+  ansible.builtin.iptables:
+    chain: INPUT
+    ctstate:
+      - ESTABLISHED
+      - RELATED
+    jump: ACCEPT
+    comment: "patroni-bench: preserve"
+    state: absent
+  become: true
+  when: scenario == 'network_partition'
+
+- name: Remove preserve rules — established/related (OUTPUT)
+  ansible.builtin.iptables:
+    chain: OUTPUT
+    ctstate:
+      - ESTABLISHED
+      - RELATED
+    jump: ACCEPT
+    comment: "patroni-bench: preserve"
+    state: absent
+  become: true
+  when: scenario == 'network_partition'
+
+- name: Remove preserve port rules (INPUT)
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ item | string }}"
+    jump: ACCEPT
+    comment: "patroni-bench: preserve"
+    state: absent
+  become: true
+  loop: "{{ partition_preserve_ports }}"
+  when: scenario == 'network_partition'
+
+- name: Remove preserve IP rules (INPUT)
+  ansible.builtin.iptables:
+    chain: INPUT
+    source: "{{ item }}"
+    jump: ACCEPT
+    comment: "patroni-bench: preserve"
+    state: absent
+  become: true
+  loop: "{{ partition_preserve_ips | default([]) }}"
+  when: scenario == 'network_partition' and (partition_preserve_ips | default([])) | length > 0
+
+- name: Remove preserve IP rules (OUTPUT)
+  ansible.builtin.iptables:
+    chain: OUTPUT
+    destination: "{{ item }}"
+    jump: ACCEPT
+    comment: "patroni-bench: preserve"
+    state: absent
+  become: true
+  loop: "{{ partition_preserve_ips | default([]) }}"
+  when: scenario == 'network_partition' and (partition_preserve_ips | default([])) | length > 0
+
+# ---- Hard-stop / hard-kill recovery: restart Patroni ----------------------
+# Not run for network_partition — Patroni was never stopped, it only lost its
+# DCS session. Once the iptables rules are removed it re-establishes on its own.
 
 - name: Start Patroni (hard_stop / hard_kill recovery)
   systemd:
     name: "{{ patroni_service }}"
     state: started
   become: true
-  ignore_errors: true
+  when: scenario in ['hard_stop', 'hard_kill']
 
-- name: Wait for recovery to propagate
-  pause:
-    seconds: "{{ recovery_wait_seconds }}"
+# ---- Network partition recovery: poll until node rejoins ------------------
+# /health returns 200 when Patroni is running and in a known-good state
+# (leader or replica). This confirms the DCS session was re-established
+# before the batch proceeds to the next iteration.
+
+- name: Wait for node to rejoin cluster as healthy member
+  ansible.builtin.uri:
+    url: "http://localhost:{{ patroni_restapi_port | default(8008) }}/health"
+    status_code: 200
+  register: rejoin
+  until: rejoin.status == 200
+  retries: 30
+  delay: 2
+  when: scenario == 'network_partition'
 
 - name: Recovery complete
   debug:
-    msg: "Recovery actions applied on {{ inventory_hostname }}. Waiting for cluster to stabilise."
+    msg: "Recovery applied on {{ inventory_hostname }} for scenario '{{ scenario }}'."

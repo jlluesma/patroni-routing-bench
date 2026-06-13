@@ -16,3 +16,18 @@ partition_mode: "full"
 
 # For asymmetric partition: list of IPs to block (e.g. ["10.0.1.20", "10.0.1.11"])
 partition_block_ips: []
+
+# Packet disposition for network partition: DROP (silent, realistic partition —
+# peers wait for TCP timeout, models a dead link / cloud security-group block)
+# or REJECT (active RST/ICMP — peer learns immediately, models host-up-but-refusing).
+# DROP is the realistic partition case and the correct default for benchmark measurements.
+partition_jump: "DROP"
+
+# IPs and ports preserved from the full partition so the node stays reachable
+# for Ansible recovery. The SSH ESTABLISHED exemption is sufficient to keep an
+# already-open control session alive; add partition_preserve_ips only if the
+# observer must continue event-tagging during the partition.
+# WARNING: do NOT add Patroni peer IPs, Consul, or cluster service ports here —
+# that would exempt peer traffic and make the partition non-functional for measurement.
+partition_preserve_ports: [22]
+partition_preserve_ips: []

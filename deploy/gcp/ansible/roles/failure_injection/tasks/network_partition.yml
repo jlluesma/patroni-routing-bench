@@ -1,20 +1,91 @@
 ---
+# partition_jump: DROP (silent — peer waits for TCP timeout, models a real dead
+# link or cloud security-group block) vs REJECT (active RST/ICMP — peer learns
+# immediately). DROP is the correct, realistic default for partition benchmarks.
+
 - name: "Network partition — full isolation from cluster subnet"
   when: partition_mode == "full"
   block:
+    # --- Preserve rules: inserted BEFORE the broad DROP so they take effect first.
+    # These keep the control/SSH path alive so the node stays recoverable without
+    # GCP serial-console access. They do NOT exempt Patroni/Consul/PG ports between
+    # cluster peers — all cluster traffic is still dropped by the rules below.
+
+    - name: Preserve established/related connections (INPUT)
+      ansible.builtin.iptables:
+        chain: INPUT
+        ctstate:
+          - ESTABLISHED
+          - RELATED
+        jump: ACCEPT
+        action: insert
+        rule_num: 1
+        comment: "patroni-bench: preserve"
+      become: true
+
+    - name: Preserve established/related connections (OUTPUT)
+      ansible.builtin.iptables:
+        chain: OUTPUT
+        ctstate:
+          - ESTABLISHED
+          - RELATED
+        jump: ACCEPT
+        action: insert
+        rule_num: 1
+        comment: "patroni-bench: preserve"
+      become: true
+
+    - name: Preserve management ports inbound (new connections)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "{{ item | string }}"
+        jump: ACCEPT
+        action: insert
+        rule_num: 1
+        comment: "patroni-bench: preserve"
+      become: true
+      loop: "{{ partition_preserve_ports }}"
+
+    - name: Preserve management IPs (INPUT)
+      ansible.builtin.iptables:
+        chain: INPUT
+        source: "{{ item }}"
+        jump: ACCEPT
+        action: insert
+        rule_num: 1
+        comment: "patroni-bench: preserve"
+      become: true
+      loop: "{{ partition_preserve_ips }}"
+      when: partition_preserve_ips | length > 0
+
+    - name: Preserve management IPs (OUTPUT)
+      ansible.builtin.iptables:
+        chain: OUTPUT
+        destination: "{{ item }}"
+        jump: ACCEPT
+        action: insert
+        rule_num: 1
+        comment: "patroni-bench: preserve"
+      become: true
+      loop: "{{ partition_preserve_ips }}"
+      when: partition_preserve_ips | length > 0
+
+    # --- Drop rules: block all cluster traffic after the preserve rules ---
+
     - name: Drop all inbound cluster traffic
-      iptables:
+      ansible.builtin.iptables:
         chain: INPUT
         source: "{{ cluster_subnet }}"
-        jump: DROP
+        jump: "{{ partition_jump }}"
         comment: "patroni-bench: network partition"
       become: true
 
     - name: Drop all outbound cluster traffic
-      iptables:
+      ansible.builtin.iptables:
         chain: OUTPUT
         destination: "{{ cluster_subnet }}"
-        jump: DROP
+        jump: "{{ partition_jump }}"
         comment: "patroni-bench: network partition"
       become: true
 
@@ -29,19 +100,19 @@
   when: partition_mode == "asymmetric"
   block:
     - name: Drop inbound from specific peers
-      iptables:
+      ansible.builtin.iptables:
         chain: INPUT
         source: "{{ item }}"
-        jump: DROP
+        jump: "{{ partition_jump }}"
         comment: "patroni-bench: asymmetric partition from {{ item }}"
       become: true
       loop: "{{ partition_block_ips }}"
 
     - name: Drop outbound to specific peers
-      iptables:
+      ansible.builtin.iptables:
         chain: OUTPUT
         destination: "{{ item }}"
-        jump: DROP
+        jump: "{{ partition_jump }}"
         comment: "patroni-bench: asymmetric partition to {{ item }}"
       become: true
       loop: "{{ partition_block_ips }}"
