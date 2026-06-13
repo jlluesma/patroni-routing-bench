@@ -5,6 +5,10 @@
 # no master socket). consul-template renders a shell script on Consul catalog
 # changes and executes it. The script sends "set server ... state ready/maint"
 # commands to the HAProxy admin socket via socat. HAProxy never reloads.
+#
+# Server-name alignment: the update script targets servers by {{.Node}} (Consul
+# node name). The consul agent template pins node_name = inventory_hostname so
+# that Consul node name == Ansible inventory hostname == HAProxy server name.
 
 - name: Install socat (required for Runtime API socket commands)
   apt:
