@@ -45,7 +45,7 @@ in `ansible/combos/`. The default is `06-haproxy-rest-polling`.
 | `06-haproxy-rest-polling-tuned` | Same as above with tuned DCS timing (ttl=20, loop_wait=5) | Supported |
 | `07-consul-template-reload` | consul-template renders haproxy.cfg on Consul catalog change; zero-downtime reload via master socket | Supported |
 | `08-consul-template-runtime-api` | consul-template renders a shell script that flips server states via the HAProxy Runtime API socket; HAProxy never reloads | Supported |
-| `09-patroni-callback-haproxy` | HAProxy updated via Patroni on_role_change callbacks | Planned |
+| `09-patroni-callback-haproxy` | Patroni `on_role_change` callback flips HAProxy server states via TCP Runtime API; no polling, no consul-template | Supported |
 
 To deploy with a non-default combo:
 
@@ -71,6 +71,12 @@ sends `echo reload | socat - UNIX-CONNECT:/run/haproxy/master.sock` on every Con
 change. The master process forks new workers with the updated config and drains the old ones —
 no connection drops. This mechanism only applies to combo 07; combos 06/06-tuned use the stock
 HAProxy service unit unchanged.
+
+**Combo 09 — Patroni callback (no polling):** HAProxy runs as a plain service with a static config. Each Patroni node has a per-node callback script (`/usr/local/bin/haproxy_callback.sh`) baked at deploy time with its own `inventory_hostname` as the HAProxy server name. Patroni calls the script synchronously on every role transition; the script connects to the HAProxy TCP Runtime API socket (`{{ haproxy_ip }}:9999`) via Python's `socket` module and sends `set server primary_backend/<name> state ready|maint`. No polling interval — the state change happens the instant Patroni promotes or demotes. **Firewall prerequisite:** TCP port 9999 from the Patroni subnet (10.0.1.0/24) to the HAProxy VM (10.0.1.30) must be open. The existing Terraform `internal` firewall rule allows all TCP within the subnet, so this is already covered — but verify before deploying on a custom network.
+
+```bash
+ansible-playbook -i inventory/gcp.ini site.yml -e @combos/09-patroni-callback-haproxy.yml
+```
 
 **Combo 08 — Runtime API (zero-reload):** HAProxy runs as a plain service (no master-worker mode, no master socket). consul-template renders `update-haproxy.sh` from a ctmpl on every Consul catalog change and executes it. The script sends `set server primary_backend/<name> state ready|maint` to `/var/run/haproxy/admin.sock` via socat. Server states flip atomically — HAProxy never restarts or reloads. Servers are named by inventory hostname (`patroni-1` etc.), matching `{{.Node}}` in the consul-template catalog.
 

@@ -39,6 +39,15 @@
     - reload systemd
     - restart patroni
 
+- name: Deploy HAProxy callback script (combo 09)
+  template:
+    src: haproxy_callback.sh.j2
+    dest: /usr/local/bin/haproxy_callback.sh
+    owner: root
+    group: root
+    mode: "0755"
+  when: routing_combo == '09-patroni-callback-haproxy'
+
 - name: Enable and start Patroni
   service:
     name: patroni

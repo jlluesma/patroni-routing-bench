@@ -67,6 +67,10 @@ postgresql:
   pg_hba:
     - host replication replicator 0.0.0.0/0 md5
     - host all all 0.0.0.0/0 md5
+{% if routing_combo == '09-patroni-callback-haproxy' %}
+  callbacks:
+    on_role_change: /usr/local/bin/haproxy_callback.sh
+{% endif %}
 
 tags:
   nofailover: false

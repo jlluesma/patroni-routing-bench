@@ -2,7 +2,7 @@
 - name: Verify routing_combo is supported by the GCP deployment
   ansible.builtin.fail:
     msg: "routing_combo '{{ routing_combo }}' is not implemented in deploy/gcp yet"
-  when: routing_combo not in ['06-haproxy-rest-polling', '06-haproxy-rest-polling-tuned', '07-consul-template-reload', '08-consul-template-runtime-api']
+  when: routing_combo not in ['06-haproxy-rest-polling', '06-haproxy-rest-polling-tuned', '07-consul-template-reload', '08-consul-template-runtime-api', '09-patroni-callback-haproxy']
 
 - name: Install HAProxy
   apt:
@@ -28,6 +28,10 @@
 - name: Include combo 08 configuration (consul-template Runtime API)
   ansible.builtin.include_tasks: "combo-08.yml"
   when: routing_combo == '08-consul-template-runtime-api'
+
+- name: Include combo 09 configuration (Patroni callback → HAProxy Runtime API)
+  ansible.builtin.include_tasks: "combo-09.yml"
+  when: routing_combo == '09-patroni-callback-haproxy'
 
 - name: Enable and start HAProxy
   service:
